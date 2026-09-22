@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Shift Coverage Solver &mdash; Preferences</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="page-head">
+    <h1>Shift Coverage Solver</h1>
+    <p class="page-sub">Weekly shift preferences for 8 people covering 24 hours a day, 7 days a week.</p>
+  </header>
+
+  <main class="page">
+
+    <!-- 1. Explanation -->
+    <section class="card" id="about">
+      <h2>What this page is for</h2>
+      <p>
+        A team covers a 24-hour day with 8 nine-hour shifts, staggered 3 hours apart.
+        Every person works 5 days and rests 2. This page captures each person's ranked
+        preferences and any hard personal constraints.
+      </p>
+      <p>
+        When the solver is run, it searches every possible assignment <strong>in this
+        browser</strong> &mdash; there is no server and no precomputed answer. The same
+        inputs always produce the same result, and nothing about the result is hidden or
+        hardcoded.
+      </p>
+      <p class="how-head">How to check it yourself</p>
+      <ol class="how">
+        <li>Change a preference below (for example, remove a rest-day pair from one person).</li>
+        <li>Run the solver and confirm the schedule changes to reflect that edit.</li>
+        <li>Change it back and confirm the original schedule returns.</li>
+        <li>Open the page source: <code>scheduler.js</code> holds the search and scoring,
+            <code>app.js</code> holds this interface. Both are plain, readable JavaScript.</li>
+      </ol>
+    </section>
+
+    <!-- 2. Fixed constraints -->
+    <section class="card" id="constraints">
+      <h2>Fixed constraints</h2>
+      <p class="note">These values are built in and cannot be edited here.</p>
+      <div class="table-wrap">
+        <table class="data-table" id="constraint-table">
+          <thead>
+            <tr><th>Constraint</th><th>Value</th><th>Meaning</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 3. People and preferences -->
+    <section id="people-section">
+      <h2>People and preferences</h2>
+      <p class="note">
+        Toggle a chip to mark an option acceptable, then drag the ranked list to put the
+        most preferred option first. The highlighted priority is the dimension treated as
+        a requirement.
+      </p>
+      <p class="note">All eight slots start at fixed times beginning 00:00.</p>
+      <div id="people-list" class="people-list"></div>
+    </section>
+
+    <!-- 4. Run, progress and log -->
+    <section class="card" id="run-section">
+      <h2>Run the solver</h2>
+      <p class="note">
+        The search runs exhaustively in this browser tab. The same preferences always
+        produce the same schedule. Editing any preference and pressing Run again
+        recomputes everything from scratch.
+      </p>
+      <div class="run-bar">
+        <button id="run-btn" class="run-btn" type="button">Run solver</button>
+        <div class="progress-wrap">
+          <div class="progress"><div id="progress-fill" class="progress-fill"></div></div>
+          <span id="progress-text" class="progress-text">idle</span>
+        </div>
+      </div>
+      <div class="tie-controls">
+        <label for="tie-seed">Tie-break: seeded random draw &mdash; seed</label>
+        <input id="tie-seed" type="number" value="1" step="1">
+        <span class="note">When several schedules tie at the top score, this seed decides which one is
+          shown. Change it and press Run again to redraw. The draw is applied to a name-sorted list,
+          so it never depends on the order people are listed.</span>
+      </div>
+      <h3 class="sub-head">Search log</h3>
+      <pre id="log" class="log" aria-live="polite"></pre>
+    </section>
+
+    <!-- 5. Results -->
+    <section id="results-section">
+      <h2>Results</h2>
+      <div id="results-empty" class="card note">No results yet &mdash; set preferences above and press Run solver.</div>
+      <div id="results" hidden>
+        <section class="card" id="tie-card">
+          <h3>Tie-break</h3>
+          <div id="tie-note"></div>
+        </section>
+        <section class="card">
+          <h3>Summary</h3>
+          <div id="summary-tiles" class="tiles"></div>
+        </section>
+        <section class="card">
+          <h3>Schedule</h3>
+          <div class="table-wrap">
+            <table class="data-table" id="schedule-table">
+              <thead>
+                <tr>
+                  <th>Person</th><th>Slot</th><th>Hours</th><th>Rest days</th>
+                  <th>Priority</th><th>Priority choice</th><th>Secondary choice</th><th>Status</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+        <section class="card">
+          <h3>Hour-by-hour coverage</h3>
+          <p class="note">Each cell is the number of people on duty that hour. Every hour must be at least the hard minimum.</p>
+          <div class="heatmap-scroll"><table class="heatmap" id="heatmap-table"></table></div>
+          <div id="heatmap-legend" class="legend"></div>
+        </section>
+        <section class="card">
+          <h3>Trade-offs and reasoning</h3>
+          <div id="explanation-body"></div>
+        </section>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="page-foot">
+    <span>Preferences only &mdash; no schedule is computed on this screen yet.</span>
+  </footer>
+
+  <script src="scheduler.js"></script>
+  <script src="vendor/Sortable.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
