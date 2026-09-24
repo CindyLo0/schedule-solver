@@ -39,6 +39,50 @@
   var views = []; // per-person DOM references
 
   // ------------------------------------------------------------------
+  // Cross-run fairness history (persisted in this browser)
+  // ------------------------------------------------------------------
+
+  var HISTORY_KEY = 'shift-solver-history-v1';
+  var storageWorking = true;
+  var history = loadHistory();
+
+  function emptyHistory() {
+    return { version: S.HISTORY_VERSION, runs: [], streaks: {} };
+  }
+
+  // Read the saved history, tolerating missing or corrupt data. Never throws:
+  // if storage is unavailable we just carry on with an empty history.
+  function loadHistory() {
+    try {
+      var raw = window.localStorage.getItem(HISTORY_KEY);
+      if (!raw) return emptyHistory();
+      var parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object' ||
+          !Array.isArray(parsed.runs) ||
+          !parsed.streaks || typeof parsed.streaks !== 'object') {
+        return emptyHistory();
+      }
+      return {
+        version: S.HISTORY_VERSION,
+        runs: parsed.runs,
+        streaks: parsed.streaks
+      };
+    } catch (err) {
+      storageWorking = false;
+      return emptyHistory();
+    }
+  }
+
+  function saveHistory() {
+    try {
+      window.localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+      storageWorking = true;
+    } catch (err) {
+      storageWorking = false;
+    }
+  }
+
+  // ------------------------------------------------------------------
   // Small helpers
   // ------------------------------------------------------------------
 
@@ -121,7 +165,10 @@
     nameInput.className = 'person-name';
     nameInput.value = person.name;
     nameInput.setAttribute('aria-label', 'Name');
-    nameInput.addEventListener('input', function () { state[index].name = nameInput.value; });
+    nameInput.addEventListener('input', function () {
+      state[index].name = nameInput.value;
+      refreshOwed();
+    });
     head.appendChild(nameInput);
 
     var pBlock = el('div', 'priority-block');
@@ -352,6 +399,8 @@
       view.endDaySel.value = String(p.noWorkWindow.endDay);
       view.endHourSel.value = String(p.noWorkWindow.endHour);
     }
+
+    refreshOwed();
   }
 
   function updateAll() {
@@ -368,6 +417,168 @@
       list.appendChild(view.card);
     });
     updateAll();
+  }
+
+  // ------------------------------------------------------------------
+  // Fairness (rotation): guaranteed list, ledger, recent runs, history
+  // ------------------------------------------------------------------
+
+  // Plain-English guarantee sentences, built entirely from the data.
+  function guaranteeSentences(people) {
+    var owedInfo = S.computeOwed(history, people);
+    var lines = [];
+    for (var i = 0; i < people.length; i++) {
+      var p = people[i];
+      var o = owedInfo.owed[i];
+      if (!o) continue;
+      if (o.slot != null) {
+        lines.push({
+          text: p.name + ' is guaranteed their #1 shift slot (' + S.SLOT_LETTERS[o.slot] +
+            ') this run \u2014 ' + missPhrase(o.slotStreak, 'slot'),
+          kind: 'slot'
+        });
+      }
+      if (o.pair != null) {
+        lines.push({
+          text: p.name + ' is guaranteed their #1 rest-day pair (' + pairLabel(o.pair) +
+            ') this run \u2014 ' + missPhrase(o.pairStreak, 'rest'),
+          kind: 'rest'
+        });
+      }
+    }
+    return lines;
+  }
+
+  function missPhrase(streak, dimension) {
+    if (!streak || streak <= 1) return 'they missed it last time.';
+    return 'they have missed it ' + streak + ' ' + dimension + ' runs in a row.';
+  }
+
+  function refreshOwed() {
+    var box = document.getElementById('owed-box');
+    if (!box) return;
+    box.innerHTML = '';
+    var lines = guaranteeSentences(state);
+
+    if (!lines.length) {
+      box.appendChild(el('p', 'note',
+        'No guarantees this round: no previous run, or everyone got their first choices last time.'));
+      return;
+    }
+
+    var list = el('ul', 'owed-list');
+    lines.forEach(function (line) {
+      var li = el('li', 'owed-item');
+      li.appendChild(el('span', 'owed-mark', 'Guaranteed:'));
+      li.appendChild(el('span', null, line.text));
+      list.appendChild(li);
+    });
+    box.appendChild(list);
+  }
+
+  function refreshLedger() {
+    var tbody = document.querySelector('#ledger-table tbody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+    var streaks = (history && history.streaks) || {};
+
+    state.forEach(function (p) {
+      var st = streaks[p.name] || { slot: 0, rest: 0 };
+      var exempt = !!p.noWorkWindow;
+      var slotMisses = exempt ? 0 : (st.slot || 0);
+      var restMisses = st.rest || 0;
+
+      var tr = document.createElement('tr');
+      tr.appendChild(el('td', null, p.name));
+      tr.appendChild(el('td', null, String(slotMisses)));
+      tr.appendChild(el('td', null, String(restMisses)));
+      tr.appendChild(el('td', 'note', exempt ? 'Exempt (has a no-work window)' : 'Tracked'));
+      tbody.appendChild(tr);
+    });
+  }
+
+  function refreshRecentRuns() {
+    var box = document.getElementById('recent-runs');
+    if (!box) return;
+    box.innerHTML = '';
+    var runs = (history && history.runs) || [];
+
+    if (!runs.length) {
+      box.appendChild(el('div', 'recent-none', 'No runs recorded yet in this browser.'));
+      return;
+    }
+
+    var wrap = el('div', 'recent-runs');
+    runs.slice().reverse().slice(0, 5).forEach(function (run) {
+      var entries = (run && run.entries) || [];
+      var slotTracked = entries.filter(function (e) { return e.slotTracked !== false; });
+      var restTracked = entries.filter(function (e) { return e.restTracked !== false; });
+      var slotHits = slotTracked.filter(function (e) { return e.slotHit; }).length;
+      var restHits = restTracked.filter(function (e) { return e.restHit; }).length;
+
+      var when = 'unknown time';
+      try {
+        var d = new Date(run.at);
+        if (!isNaN(d.getTime())) when = d.toLocaleString();
+      } catch (err) { /* keep the placeholder */ }
+
+      var row = el('div', 'recent-run');
+      row.appendChild(el('span', 'recent-when', when + ': '));
+      row.appendChild(el('span', null,
+        'first slot given to ' + slotHits + ' of ' + slotTracked.length +
+        ' tracked, first rest pair given to ' + restHits + ' of ' + restTracked.length + ' tracked.'));
+      wrap.appendChild(row);
+    });
+    box.appendChild(wrap);
+  }
+
+  function refreshFairness() {
+    refreshOwed();
+    refreshLedger();
+    refreshRecentRuns();
+  }
+
+  function downloadHistory() {
+    var text = JSON.stringify(history, null, 2);
+    try {
+      var blob = new Blob([text], { type: 'application/json' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = 'shift-solver-history.json';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(url); }, 0);
+    } catch (err) {
+      logLine('Could not build the history download in this browser.');
+    }
+  }
+
+  function wireHistoryControls() {
+    var dl = document.getElementById('download-history');
+    if (dl) dl.addEventListener('click', downloadHistory);
+
+    var reset = document.getElementById('reset-history');
+    var confirmBox = document.getElementById('reset-confirm');
+    var yes = document.getElementById('reset-confirm-yes');
+    var no = document.getElementById('reset-confirm-no');
+
+    if (reset && confirmBox) {
+      reset.addEventListener('click', function () { confirmBox.hidden = false; });
+    }
+    if (no && confirmBox) {
+      no.addEventListener('click', function () { confirmBox.hidden = true; });
+    }
+    if (yes && confirmBox) {
+      yes.addEventListener('click', function () {
+        history = emptyHistory();
+        saveHistory();
+        confirmBox.hidden = true;
+        refreshFairness();
+        logLine('Rotation history cleared.');
+      });
+    }
   }
 
   // ------------------------------------------------------------------
@@ -396,12 +607,16 @@
       fill.style.width = '0%';
       ptext.textContent = 'running\u2026';
 
-      logLine('Starting exhaustive search (strict phase).');
+      logLine('Starting exhaustive search (open domain).');
       logLine('Preferences loaded for ' + state.length + ' people, ' + config.numSlots + ' slots.');
 
       var lastLog = 0, lastPhase = null, lastHasBest = false, snapshots = 0;
       var frozen = state.map(clonePerson); // snapshot so mid-run edits cannot disturb it
       lastRunPeople = frozen;
+
+      var owedInfo = S.computeOwed(history, frozen);
+      logLine('Rotation: ' + owedInfo.list.length + ' guarantee' +
+        (owedInfo.list.length === 1 ? '' : 's') + ' owed going into this run.');
 
       var seedInput = document.getElementById('tie-seed');
       var seed = parseInt(seedInput.value, 10);
@@ -410,6 +625,7 @@
 
       S.solveAsync(frozen, config, {
         tieSeed: seed,
+        owed: owedInfo.owed,
         onProgress: function (s) {
           if (!s || typeof s.outerChecked !== 'number' || typeof s.totalOuter !== 'number' ||
               typeof s.innerChecked !== 'number' || typeof s.hasBest !== 'boolean') {
@@ -424,12 +640,7 @@
 
           if (s.phase !== lastPhase) {
             lastPhase = s.phase;
-            if (s.phase === 'relaxed') {
-              logLine('Strict phase infeasible. Relaxing rest-day requirements (relaxed phase), ' +
-                s.totalOuter + ' outer arrangements.');
-            } else {
-              logLine('Phase ' + s.phase + ': ' + s.totalOuter + ' outer arrangements to try.');
-            }
+            logLine('Phase ' + s.phase + ': ' + s.totalOuter + ' outer arrangements to try.');
           }
           if (s.hasBest && !lastHasBest) {
             lastHasBest = true;
@@ -457,6 +668,17 @@
                   ' using seed ' + result.tie.seed + '.'
                 : ' (no tie).'));
           }
+          if (result.guarantees) {
+            logLine('Guarantees: ' + result.guarantees.owed.length + ' owed; ' +
+              result.guarantees.satisfied.length + ' satisfied, ' +
+              result.guarantees.dropped.length + ' dropped.');
+          }
+          var runRecord = S.buildRunRecord(result.assignment, frozen);
+          history = S.appendHistory(history, runRecord);
+          saveHistory();
+          refreshFairness();
+          logLine('Rotation history saved for the next run (' + history.runs.length +
+            ' run' + (history.runs.length === 1 ? '' : 's') + ' recorded).');
         } else {
           logLine('No schedule produced: ' + result.error + '.');
         }
@@ -661,8 +883,8 @@
       var msg;
       if (result.error === 'infeasible') {
         msg = 'The exhaustive search proved that no assignment can keep at least ' +
-          config.minCoverage + ' people on duty in all 168 hours, even after relaxing every ' +
-          'rest-day requirement. No valid schedule exists for these preferences.';
+          config.minCoverage + ' people on duty in all 168 hours while respecting the ' +
+          'no-work windows and any rotation guarantees. No valid schedule exists for these preferences.';
       } else if (result.error === 'exact-start-contradiction') {
         msg = 'Two requested exact start hours do not fall on the same ' + config.stagger +
           '-hour grid, so no single set of evenly spaced slots can satisfy both. Change one of the requested hours.';
@@ -730,16 +952,27 @@
                       : 'All were satisfied.')]
     });
 
-    if (result.phase === 'relaxed') {
-      var relaxedRest = result.assignment.filter(function (a) {
-        return a.priority === 'rest' && !a.priorityMet;
-      }).map(function (a) { return a.name; });
+    if (result.guarantees && result.guarantees.owed.length > 0) {
+      var g = result.guarantees;
+      var gText = [];
+      g.satisfied.forEach(function (item) {
+        var what = item.dimension === 'slot'
+          ? 'slot ' + S.SLOT_LETTERS[item.value]
+          : 'rest days ' + pairLabel(item.value);
+        gText.push(item.name + ' got ' + what + ' because they missed their #1 ' +
+          (item.dimension === 'slot' ? 'slot' : 'rest-day pair') +
+          ' last run and it was guaranteed this run.');
+      });
+      g.dropped.forEach(function (item) {
+        var what = item.dimension === 'slot'
+          ? 'slot ' + S.SLOT_LETTERS[item.value]
+          : 'rest days ' + pairLabel(item.value);
+        gText.push('The guarantee for ' + item.name + ' (' + what +
+          ') could not be satisfied: ' + item.reason + '.');
+      });
       out.push({
-        h: 'Relaxed rest-day requirements',
-        text: ['It was impossible to give every rest-priority person a listed pair while holding coverage, ' +
-          'so those lists were relaxed. ' + (relaxedRest.length
-            ? relaxedRest.join(', ') + ' received a rest-day pair outside their list.'
-            : 'The relaxed search still found the least-bad assignment.')]
+        h: 'Guarantees carried over from the last run',
+        text: gText.length ? gText : ['No guarantees were applied this run.']
       });
     }
 
@@ -793,4 +1026,6 @@
   renderConstraints();
   renderPeople();
   wireRun();
+  wireHistoryControls();
+  refreshFairness();
 })();

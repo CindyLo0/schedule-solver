@@ -64,7 +64,59 @@
       <div id="people-list" class="people-list"></div>
     </section>
 
-    <!-- 4. Run, progress and log -->
+    <!-- 4. Cross-run fairness (rotation) -->
+    <section class="card" id="fairness-section">
+      <h2>Cross-run fairness (rotation)</h2>
+      <p class="note">
+        Every finished run is remembered in this browser. Next time, anyone who missed their
+        first choice is given a guarantee so the same person is not unlucky twice in a row.
+        This is called rotation.
+      </p>
+
+      <h3 class="sub-head">Guaranteed this round</h3>
+      <div id="owed-box"></div>
+
+      <h3 class="sub-head">Fairness ledger</h3>
+      <p class="note">
+        A consecutive-miss count rises by one each time a person does not get their first
+        choice, and drops back to zero as soon as they do. A person who has a no-work window
+        is exempt from slot tracking, because that window already decides their slot; their
+        slot count stays at zero. The ledger is saved in this browser only and is never uploaded.
+      </p>
+      <div class="table-wrap">
+        <table class="data-table" id="ledger-table">
+          <thead>
+            <tr>
+              <th>Person</th>
+              <th>Slot: consecutive misses</th>
+              <th>Rest days: consecutive misses</th>
+              <th>Slot tracking</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <h3 class="sub-head">Recent runs</h3>
+      <div id="recent-runs"></div>
+
+      <h3 class="sub-head">History</h3>
+      <p class="note">
+        The history lives only in this browser and is never uploaded. You can download a copy
+        as a JSON file, or clear it to start fresh.
+      </p>
+      <div class="history-controls">
+        <button id="download-history" type="button" class="mini-btn">Download history JSON</button>
+        <button id="reset-history" type="button" class="mini-btn">Reset history</button>
+      </div>
+      <div id="reset-confirm" class="reset-confirm" hidden>
+        <span>Clear all saved rotation history in this browser? This cannot be undone.</span>
+        <button id="reset-confirm-yes" type="button" class="mini-btn">Yes, clear history</button>
+        <button id="reset-confirm-no" type="button" class="mini-btn">Cancel</button>
+      </div>
+    </section>
+
+    <!-- 5. Run, progress and log -->
     <section class="card" id="run-section">
       <h2>Run the solver</h2>
       <p class="note">
@@ -90,7 +142,7 @@
       <pre id="log" class="log" aria-live="polite"></pre>
     </section>
 
-    <!-- 5. Results -->
+    <!-- 6. Results -->
     <section id="results-section">
       <h2>Results</h2>
       <div id="results-empty" class="card note">No results yet &mdash; set preferences above and press Run solver.</div>
@@ -133,7 +185,7 @@
   </main>
 
   <footer class="page-foot">
-    <span>Preferences only &mdash; no schedule is computed on this screen yet.</span>
+    <span>The solver runs in this browser &mdash; press Run solver to compute the weekly schedule. Rotation history is saved in this browser only.</span>
   </footer>
 
   <script src="scheduler.js"></script>

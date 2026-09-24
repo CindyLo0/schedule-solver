@@ -4,7 +4,7 @@
  * Run with:  node test-stage2.js
  *
  * The important part is section 3: the real solver is compared against a
- * slow, dumb brute-force search (no pruning, no ordering) over small random
+ * slow, dumb brute-force search (no pruning, no ordering) over small synthetic
  * cases. Both must return the same score, or the shortcuts are not safe.
  */
 
@@ -48,10 +48,15 @@ eq('returned grid has zero hours below 2', below, 0);
 
 var daph = null;
 res.assignment.forEach(function (a) { if (a.name === 'Daphine') daph = a; });
+var daphPerson = S.defaultPeople.filter(function (p) { return p.name === 'Daphine'; })[0];
 check('Daphine present', !!daph);
-check('Daphine gets slot G', daph && daph.slotLetter === 'G');
-check('Daphine starts at 19:00', daph && daph.slotStart === 19);
-check('Daphine rests Thu-Fri', daph && S.pairKey(daph.restDays) === S.pairKey([3, 4]));
+// Current open-domain result: Daphine takes slot B (03:00), her least-preferred
+// slot, and rest pair Sat-Sun, which still keeps her out of her no-work window.
+check('Daphine gets slot B', daph && daph.slotLetter === 'B');
+check('Daphine starts at 03:00', daph && daph.slotStart === 3);
+check('Daphine rests Sat-Sun', daph && S.pairKey(daph.restDays) === S.pairKey([5, 6]));
+check('Daphine is never on duty inside her no-work window',
+      daph && S.satisfiesNoWorkWindow(daphPerson, daph.slotStart, daph.restDays, config) === true);
 
 console.log('\n  Search stats: ' + JSON.stringify(res.stats));
 console.log('  Phase: ' + res.phase + '   Elapsed: ' + elapsed + ' ms\n');
@@ -75,10 +80,19 @@ check('min = 2 and max = 3 are the only values', mn === 2 && mx === 3);
 
 // =====================================================================
 console.log('\n3. Shortcut safety: real solver vs dumb brute force (small cases)');
+console.log('   Brute force model (current, open domain):');
+console.log('     - every person may take any of cfg.numSlots slots and any of');
+console.log('       the 7 consecutive rest pairs, even ones they did not rank;');
+console.log('     - hard coverage on all 168 hours and each no-work window;');
+console.log('     - weighted rank penalty (priority dimension * 100, other * 1);');
+console.log('     - window people are pinned to the first (least-preferred)');
+console.log('       workable slot combination that admits a feasible schedule,');
+console.log('       exactly as the solver does. No pruning or ordering shortcuts.');
 // =====================================================================
 
 // ---- independent brute force (no pruning, no ordering) ----------------
 function pairKey(p) { var a = p[0], b = p[1]; return a <= b ? a + ',' + b : b + ',' + a; }
+
 function rankManual(list, value, kind) {
   list = list || [];
   if (kind === 'rest') {
@@ -89,6 +103,7 @@ function rankManual(list, value, kind) {
   var idx = list.indexOf(value);
   return idx >= 0 ? idx : list.length;
 }
+
 function scoreManual(entries, pw, sw) {
   var t = 0;
   entries.forEach(function (e) {
@@ -100,6 +115,7 @@ function scoreManual(entries, pw, sw) {
   });
   return t;
 }
+
 function coverageOkManual(entries, cfg) {
   var counts = new Int16Array(HOURS_PER_WEEK);
   entries.forEach(function (e) {
@@ -109,103 +125,108 @@ function coverageOkManual(entries, cfg) {
   for (var h = 0; h < HOURS_PER_WEEK; h++) if (counts[h] < cfg.minCoverage) return false;
   return true;
 }
+
 function windowsOkManual(entries, cfg) {
   return entries.every(function (e) {
     return S.satisfiesNoWorkWindow(e.person, e.slotStart, e.restDays, cfg);
   });
 }
-function allowedPairs(person, relaxed) {
-  if (person.exactStart != null) {
-    return (person.restOptions && person.restOptions.length) ? person.restOptions : S.ADJACENT_PAIRS;
+
+// A slot is "workable" for a window person when at least one rest pair keeps
+// them out of the window at that slot (the solver's slotWindowAllowed).
+function slotWorkableManual(person, slotStart, cfg) {
+  if (!person.noWorkWindow) return true;
+  for (var i = 0; i < S.ADJACENT_PAIRS.length; i++) {
+    if (S.satisfiesNoWorkWindow(person, slotStart, S.ADJACENT_PAIRS[i], cfg)) return true;
   }
-  if (person.priority === 'rest') {
-    if (relaxed) return S.ADJACENT_PAIRS;
-    return (person.restOptions && person.restOptions.length) ? person.restOptions : S.ADJACENT_PAIRS;
-  }
-  return S.ADJACENT_PAIRS;
-}
-function eachProduct(lists, cb) {
-  if (lists.length === 0) { cb([]); return; }
-  var cur = new Array(lists.length);
-  (function rec(i) {
-    if (i === lists.length) { cb(cur.slice()); return; }
-    for (var j = 0; j < lists[i].length; j++) { cur[i] = lists[i][j]; rec(i + 1); }
-  })(0);
+  return false;
 }
 
-// One phase of brute force. Returns {best:Infinity} when nothing is feasible.
-function brutePhase(people, cfg, relaxed) {
-  var locked = [], free = [];
-  people.forEach(function (p) { if (p.exactStart != null) locked.push(p); else free.push(p); });
-
-  var offSet = {};
-  locked.forEach(function (p) { offSet[S.offsetForExactStart(p.exactStart, cfg)] = true; });
-  var offKeys = Object.keys(offSet);
-  if (offKeys.length > 1) return { contradiction: true };
-  var offset = offKeys.length ? Number(offKeys[0]) : 0;
-  var slots = S.computeSlots(cfg, offset);
-
-  var used = {}, lockedSlot = [], conflict = false;
-  locked.forEach(function (p) {
-    var si = S.slotForExactStart(p.exactStart, cfg, offset);
-    if (si < 0 || used[si]) conflict = true;
-    else { used[si] = true; lockedSlot.push(si); }
+// position of each workable slot in the solver's least-preferred-first order
+// (greater rank first, later letter first). Missing => not workable.
+function windowOrderMap(person, slots, cfg) {
+  var workable = [];
+  for (var s = 0; s < cfg.numSlots; s++) {
+    if (slotWorkableManual(person, slots[s], cfg)) workable.push(s);
+  }
+  workable.sort(function (a, b) {
+    var ra = rankManual(person.shiftOptions, a, 'hours');
+    var rb = rankManual(person.shiftOptions, b, 'hours');
+    if (rb !== ra) return rb - ra;
+    return b - a;
   });
-  if (conflict) return { slotConflict: true };
+  var map = {};
+  workable.forEach(function (s, i) { map[s] = i; });
+  return map;
+}
 
-  var available = [];
-  for (var s = 0; s < cfg.numSlots; s++) if (!used[s]) available.push(s);
-
-  var pw = S.PRIORITY_WEIGHT, sw = S.SOFT_WEIGHT;
-  var best = Infinity;
-
-  (function recSlots(i, remaining, slotOfFree) {
-    if (i === free.length) {
-      var allPeople = locked.concat(free);
-      var allowed = allPeople.map(function (p) { return allowedPairs(p, relaxed); });
-      eachProduct(allowed, function (pairs) {
-        var entries = [];
-        for (var a = 0; a < locked.length; a++) {
-          entries.push({ person: locked[a], slotIndex: lockedSlot[a], slotStart: slots[lockedSlot[a]], restDays: pairs[a] });
-        }
-        for (var b = 0; b < free.length; b++) {
-          var slot = slotOfFree[b];
-          entries.push({ person: free[b], slotIndex: slot, slotStart: slots[slot], restDays: pairs[locked.length + b] });
-        }
-        if (!windowsOkManual(entries, cfg)) return;
-        if (!coverageOkManual(entries, cfg)) return;
-        var sc = scoreManual(entries, pw, sw);
-        if (sc < best) best = sc;
-      });
-      return;
-    }
-    for (var r = 0; r < remaining.length; r++) {
-      slotOfFree[i] = remaining[r];
-      var next = remaining.slice(0, r).concat(remaining.slice(r + 1));
-      recSlots(i + 1, next, slotOfFree);
-    }
-  })(0, available.slice(), new Array(free.length));
-
-  return { best: best, offset: offset, slots: slots };
+function sameTuple(a, b) { return a.length === b.length && a.every(function (v, i) { return v === b[i]; }); }
+function lexLess(a, b) {
+  for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] < b[i];
+  return false;
 }
 
 function bruteSolve(people, cfg) {
-  var a = brutePhase(people, cfg, false);
-  if (a.contradiction || a.slotConflict) return { ok: false, error: 'config' };
-  if (a.best === Infinity) {
-    var b = brutePhase(people, cfg, true);
-    if (b.best === Infinity) return { ok: false, error: 'infeasible' };
-    return { ok: true, score: b.best, phase: 'relaxed' };
+  var pw = S.PRIORITY_WEIGHT, sw = S.SOFT_WEIGHT;
+  var slots = S.computeSlots(cfg, 0);
+  var n = people.length;
+
+  var windowIdx = [];
+  people.forEach(function (p, i) { if (p.noWorkWindow) windowIdx.push(i); });
+  var orderMaps = windowIdx.map(function (i) { return windowOrderMap(people[i], slots, cfg); });
+  for (var w = 0; w < orderMaps.length; w++) {
+    if (Object.keys(orderMaps[w]).length === 0) return { ok: false, error: 'infeasible' };
   }
-  return { ok: true, score: a.best, phase: 'strict' };
+
+  var bestTuple = null, best = Infinity;
+  var assign = new Array(n), used = new Array(cfg.numSlots).fill(false);
+  var pairs = new Array(n);
+
+  function evaluate() {
+    var entries = [];
+    for (var i = 0; i < n; i++) {
+      entries.push({
+        person: people[i], slotIndex: assign[i],
+        slotStart: slots[assign[i]], restDays: pairs[i]
+      });
+    }
+    if (!windowsOkManual(entries, cfg)) return;
+    if (!coverageOkManual(entries, cfg)) return;
+
+    var tuple = windowIdx.map(function (pi, k) { return orderMaps[k][assign[pi]]; });
+    var sc = scoreManual(entries, pw, sw);
+    if (bestTuple === null || lexLess(tuple, bestTuple)) { bestTuple = tuple; best = sc; }
+    else if (sameTuple(tuple, bestTuple) && sc < best) { best = sc; }
+  }
+
+  function recRest(i) {
+    if (i === n) { evaluate(); return; }
+    for (var pi = 0; pi < S.ADJACENT_PAIRS.length; pi++) {
+      pairs[i] = S.ADJACENT_PAIRS[pi];
+      recRest(i + 1);
+    }
+  }
+
+  function recSlot(i) {
+    if (i === n) { recRest(0); return; }
+    for (var s = 0; s < cfg.numSlots; s++) {
+      if (used[s]) continue;
+      used[s] = true; assign[i] = s;
+      recSlot(i + 1);
+      used[s] = false;
+    }
+  }
+  recSlot(0);
+
+  if (best === Infinity) return { ok: false, error: 'infeasible' };
+  return { ok: true, score: best };
 }
 
-// ---- deterministic random small cases ---------------------------------
+// ---- deterministic synthetic cases ------------------------------------
 function makeRng(seed) {
   var s = seed >>> 0;
   return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
 }
-function pick(rng, arr) { return arr[Math.floor(rng() * arr.length)]; }
 function sample(rng, arr, n) {
   var copy = arr.slice(), out = [];
   while (out.length < n && copy.length) out.push(copy.splice(Math.floor(rng() * copy.length), 1)[0]);
@@ -227,64 +248,61 @@ function makeCase(seed, opts) {
       restOptions: restOptions,
       shiftOptions: shiftOptions,
       priority: isRest ? 'rest' : 'hours',
-      exactStart: null,
       noWorkWindow: null
     });
-  }
-  if (opts.lockIndex != null) {
-    var lp = people[opts.lockIndex];
-    lp.exactStart = opts.lockStart;
   }
   if (opts.windowIndex != null) {
     people[opts.windowIndex].noWorkWindow = opts.window;
   }
-  return { cfg: cfg, people: people };
+  return { label: opts.label, cfg: cfg, people: people };
 }
 
-// A mix: some with no coverage floor (pure score optimisation, so both
-// versions must agree on the best preferences), and some with a real coverage
-// floor where the capacity pruning actually bites. shiftLen 24 / 2 slots keeps
-// a real coverage constraint but stays small enough for the dumb brute force.
 var cases = [
-  makeCase(1, { cfg: { shiftLen: 9, stagger: 8, minCoverage: 0, numSlots: 3 }, count: 3 }),
-  makeCase(2, { cfg: { shiftLen: 6, stagger: 6, minCoverage: 0, numSlots: 4 }, count: 4 }),
-  makeCase(3, { cfg: { shiftLen: 9, stagger: 6, minCoverage: 0, numSlots: 4 }, count: 4 }),
-  makeCase(4, { cfg: { shiftLen: 9, stagger: 8, minCoverage: 0, numSlots: 3 }, count: 3, lockIndex: 0, lockStart: 19 }),
-  makeCase(5, { cfg: { shiftLen: 24, stagger: 8, minCoverage: 1, numSlots: 3 }, count: 3 }),
-  makeCase(6, { cfg: { shiftLen: 24, stagger: 6, minCoverage: 1, numSlots: 4 }, count: 4 }),
-  makeCase(7, { cfg: { shiftLen: 24, stagger: 8, minCoverage: 1, numSlots: 3 }, count: 3, lockIndex: 0, lockStart: 19 }),
-  makeCase(8, {
+  makeCase(11, {
+    label: 'case 1 (3 people, 3 slots, no coverage floor)',
+    cfg: { shiftLen: 24, stagger: 8, minCoverage: 0, numSlots: 3 }, count: 3
+  }),
+  makeCase(12, {
+    label: 'case 2 (4 people, 4 slots, no coverage floor)',
+    cfg: { shiftLen: 24, stagger: 6, minCoverage: 0, numSlots: 4 }, count: 4
+  }),
+  makeCase(13, {
+    label: 'case 3 (3 people, 3 slots, minimum coverage 1)',
+    cfg: { shiftLen: 24, stagger: 8, minCoverage: 1, numSlots: 3 }, count: 3
+  }),
+  makeCase(14, {
+    label: 'case 4 (4 people, 4 slots, minimum coverage 1)',
+    cfg: { shiftLen: 12, stagger: 6, minCoverage: 1, numSlots: 4 }, count: 4
+  }),
+  makeCase(15, {
+    label: 'case 5 (3 people, 3 slots, no-work window on P1)',
     cfg: { shiftLen: 24, stagger: 8, minCoverage: 1, numSlots: 3 }, count: 3,
     windowIndex: 1, window: { startDay: 4, startHour: 18, endDay: 5, endHour: 18 }
   }),
-  // Forced fallback: every rest-priority person only accepts Mon-Tue, which
-  // cannot cover the week, so the strict phase must prove infeasible and the
-  // relaxed phase must find the best compromise. Both solvers must agree.
   {
-    cfg: { shiftLen: 24, stagger: 8, minCoverage: 1, numSlots: 3 },
+    label: 'case 6 (3 people, 3 slots, impossible minimum coverage)',
+    cfg: { shiftLen: 24, stagger: 8, minCoverage: 3, numSlots: 3 },
     people: [
-      { name: 'P0', restOptions: [[0, 1]], shiftOptions: [0, 1], priority: 'rest', exactStart: null, noWorkWindow: null },
-      { name: 'P1', restOptions: [[0, 1]], shiftOptions: [1, 2], priority: 'rest', exactStart: null, noWorkWindow: null },
-      { name: 'P2', restOptions: [[0, 1]], shiftOptions: [0, 2], priority: 'rest', exactStart: null, noWorkWindow: null }
+      { name: 'P0', restOptions: [[4, 5]], shiftOptions: [0, 1], priority: 'hours', noWorkWindow: null },
+      { name: 'P1', restOptions: [[0, 1]], shiftOptions: [1, 2], priority: 'rest', noWorkWindow: null },
+      { name: 'P2', restOptions: [[2, 3]], shiftOptions: [0, 2], priority: 'rest', noWorkWindow: null }
     ]
   }
 ];
 
-cases.forEach(function (c, i) {
+cases.forEach(function (c) {
   var t = Date.now();
   var real = S.solve(c.people, c.cfg, {});
   var dumb = bruteSolve(c.people, c.cfg);
   var ms = Date.now() - t;
-  var label = 'case ' + (i + 1) + ' (' + c.people.length + ' people, ' + c.cfg.numSlots +
-    ' slots, min=' + c.cfg.minCoverage + ')';
   if (real.ok !== dumb.ok) {
-    check(label + ' -- ok flags agree (real=' + real.ok + ', brute=' + dumb.ok + ')', false);
+    check(c.label + ' -- ok flags agree (real=' + real.ok + ', brute=' + dumb.ok + ')', false);
   } else if (real.ok && real.score !== dumb.score) {
-    check(label + ' -- scores agree (real=' + real.score + ', brute=' + dumb.score + ')', false);
+    check(c.label + ' -- scores agree (real=' + real.score + ', brute=' + dumb.score + ')', false);
   } else if (real.ok) {
-    check(label + ' -- scores agree (' + real.score + ', phase ' + real.phase + ')', true);
+    check(c.label + ' -- scores agree (' + real.score + ')', true);
   } else {
-    check(label + ' -- both correctly infeasible', true);
+    check(c.label + ' -- both correctly infeasible', true);
   }
   console.log('        real=' + (real.ok ? real.score : real.error) +
     '  brute=' + (dumb.ok ? dumb.score : dumb.error) + '   [' + ms + ' ms]');

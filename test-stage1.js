@@ -32,10 +32,11 @@ console.log('Stage 1 tests — scheduler.js\n');
 
 // ---------------------------------------------------------------------
 console.log('1. Slot math');
+// The grid is fixed at 00:00 offset 0. There is no "exact start" lock any
+// more: the candidate domain is open, so the old offsetForExactStart /
+// slotForExactStart helpers were removed and are gone from this test.
 eq('computeSlots(offset 0)', S.computeSlots(config, 0), [0, 3, 6, 9, 12, 15, 18, 21]);
 eq('computeSlots(offset 1)', S.computeSlots(config, 1), [1, 4, 7, 10, 13, 16, 19, 22]);
-eq('offsetForExactStart(19) = 1', S.offsetForExactStart(19, config), 1);
-eq('slot landing at 19:00 is G (index 6)', S.slotForExactStart(19, config, 1), 6);
 
 // ---------------------------------------------------------------------
 console.log('\n2. Overnight wraparound — a 22:00 shift runs into the next day');
@@ -68,11 +69,19 @@ check('Sun-night shift covers Sun 22,23 and Mon 00..06 via week wrap',
 check('Sun-night shift does NOT reach Mon 07:00', sundayWrap[0][7] === 0);
 
 // ---------------------------------------------------------------------
-console.log('\n3. Daphine — no-work window Fri 18:00 -> Sat 18:00, slot at 19:00');
+console.log('\n3. Daphine — no-work window Fri 18:00 -> Sat 18:00');
 var daphine = S.defaultPeople.filter(function (p) { return p.name === 'Daphine'; })[0];
 check('Daphine found in default dataset', !!daphine);
-check('Daphine defaults are exactly as in PROMPT (19:00, rest priority)',
-      daphine.exactStart === 19 && daphine.priority === 'rest');
+check('Daphine has no exact-start lock (open domain)', daphine && daphine.exactStart == null);
+check('Daphine prioritises rest', daphine && daphine.priority === 'rest');
+check('Daphine #1 rest pair is Fri-Sat',
+      daphine && S.pairKey(daphine.restOptions[0]) === S.pairKey([4, 5]));
+check('Daphine no-work window is Fri 18:00 -> Sat 18:00',
+      daphine && daphine.noWorkWindow &&
+      daphine.noWorkWindow.startDay === 4 && daphine.noWorkWindow.startHour === 18 &&
+      daphine.noWorkWindow.endDay === 5 && daphine.noWorkWindow.endHour === 18);
+
+// Slots are still global; these checks are about duty hours versus the window.
 check('Daphine at 19:00 with Thu-Fri off satisfies the window',
       S.satisfiesNoWorkWindow(daphine, 19, [3, 4], config) === true);
 check('Daphine at 19:00 WITHOUT Friday off violates the window',
@@ -111,8 +120,6 @@ check('min coverage >= 2 (hard constraint holds)', min >= 2);
 check('max coverage is 3 (nothing overstaffed)', max === 3);
 check('meetsCoverage(grid, 2) is true', S.meetsCoverage(grid, 2) === true);
 check('meetsCoverage(grid, 3) is false', S.meetsCoverage(grid, 3) === false);
-check('Daphine never on duty inside her window in this assignment',
-      S.satisfiesNoWorkWindow(daphine, 19, [3, 4], config) === true);
 
 console.log('\n  Coverage by day (headcount per hour):');
 S.DAYS.forEach(function (day, d) {
@@ -120,10 +127,28 @@ S.DAYS.forEach(function (day, d) {
 });
 
 // ---------------------------------------------------------------------
-console.log('\n5. scoreAssignment sanity');
+console.log('\n5. scoreAssignment — open-domain rank semantics');
+// Lower is better. A person's priority dimension is weighted 100, the other 1.
+// A value that is not listed gets rank = list.length (one worse than last).
+var daphSheets = [{ person: daphine, name: 'Daphine', slotIndex: 6, slotStart: 18, restDays: [4, 5] }];
+eq('Daphine on her #1 slot and #1 rest pair scores 0',
+   S.scoreAssignment(daphSheets, config), 0);
+
+var daphOff = [{ person: daphine, name: 'Daphine', slotIndex: 5, slotStart: 15, restDays: [0, 1] }];
+// priority rest: unranked rest pair rank 5 (= list length) * 100, + slot rank 1 * 1 = 501.
+eq('Daphine unranked rest pair (rank = list length) is weighted heavily: 501',
+   S.scoreAssignment(daphOff, config), 501);
+
+var cindy = S.defaultPeople[0];
+var cindyOff = [{ person: cindy, name: 'Cindy', slotIndex: 2, slotStart: 6, restDays: [0, 1] }];
+// priority hours: slot rank 3 * 100, + rest rank 1 * 1 = 301.
+eq('Cindy slot rank 3 is weighted heavily: 301',
+   S.scoreAssignment(cindyOff, config), 301);
+
 var score = S.scoreAssignment(full, config);
-check('scoreAssignment returns a finite number', typeof score === 'number' && isFinite(score));
-console.log('    full assignment score (lower is better): ' + score);
+check('scoreAssignment on the hand-built sheet returns a finite number',
+      typeof score === 'number' && isFinite(score));
+console.log('    hand-built assignment score (lower is better): ' + score);
 
 // ---------------------------------------------------------------------
 console.log('\n----------------------------------------');

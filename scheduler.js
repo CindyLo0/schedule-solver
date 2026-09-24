@@ -67,60 +67,71 @@
   // noWorkWindow: optional { startDay, startHour, endDay, endHour }; the
   //   person may never be on duty inside that window (checked against their
   //   actual shift hours, overnight spans included).
+  // Full personal rankings supplied by the team (rankings.txt), highest
+  // preference first. Slot letters: A=0 ... H=7. Rest pairs are the seven
+  // consecutive day pairs, Mon-Tue=[0,1] ... Sun-Mon=[6,0].
   var defaultPeople = [
     {
       name: 'Cindy',
-      restOptions: [[0, 1]],
-      shiftOptions: [4, 5], // E, F
+      // Sun-Mon, Mon-Tue, Fri-Sat, Sat-Sun, Tue-Wed, Wed-Thu
+      restOptions: [[6, 0], [0, 1], [4, 5], [5, 6], [1, 2], [2, 3]],
+      shiftOptions: [5, 4, 3, 2, 1, 6, 0, 7], // F, E, D, C, B, G, A, H
       priority: 'hours',
       noWorkWindow: null
     },
     {
       name: 'Inah',
-      restOptions: [[4, 5]],
-      shiftOptions: [4, 1], // E, B
+      // Fri-Sat, Sun-Mon, Sat-Sun, Thu-Fri, Tue-Wed
+      restOptions: [[4, 5], [6, 0], [5, 6], [3, 4], [1, 2]],
+      shiftOptions: [4, 3, 5, 2, 6, 1, 7, 0], // E, D, F, C, G, B, H, A
       priority: 'hours',
       noWorkWindow: null
     },
     {
       name: 'Daphine',
-      restOptions: [[4, 5]],
-      shiftOptions: [6, 5], // G, F
+      // Fri-Sat, Sat-Sun, Sun-Mon, Thu-Fri, Tue-Wed
+      restOptions: [[4, 5], [5, 6], [6, 0], [3, 4], [1, 2]],
+      shiftOptions: [6, 5, 4, 3, 2, 7, 0, 1], // G, F, E, D, C, H, A, B
       priority: 'rest',
       noWorkWindow: { startDay: 4, startHour: 18, endDay: 5, endHour: 18 }
     },
     {
       name: 'Bing',
-      restOptions: [[4, 5]],
-      shiftOptions: [0, 1, 2], // A, B, C
+      // Sat-Sun, Fri-Sat, Sun-Mon, Tue-Wed, Thu-Fri
+      restOptions: [[5, 6], [4, 5], [6, 0], [1, 2], [3, 4]],
+      shiftOptions: [0, 3, 1, 2, 4, 7, 5, 6], // A, D, B, C, E, H, F, G
       priority: 'hours',
       noWorkWindow: null
     },
     {
       name: 'Phoebe',
-      restOptions: [[5, 6], [6, 0]], // Sat-Sun, Sun-Mon
-      shiftOptions: [2, 3, 4], // C, D, E
+      // Sat-Sun, Sun-Mon, Fri-Sat, Thu-Fri, Tue-Wed
+      restOptions: [[5, 6], [6, 0], [4, 5], [3, 4], [1, 2]],
+      shiftOptions: [2, 3, 1, 4, 5, 0, 6, 7], // C, D, B, E, F, A, G, H
       priority: 'rest',
       noWorkWindow: null
     },
     {
       name: 'Joan',
-      restOptions: [[4, 5]],
-      shiftOptions: [2, 1], // C, B
+      // Sat-Sun, Sun-Mon, Fri-Sat, Thu-Fri, Tue-Wed
+      restOptions: [[5, 6], [6, 0], [4, 5], [3, 4], [1, 2]],
+      shiftOptions: [2, 1, 3, 4, 0, 5, 6, 7], // C, B, D, E, A, F, G, H
       priority: 'hours',
       noWorkWindow: null
     },
     {
       name: 'LA',
-      restOptions: [[4, 5]],
-      shiftOptions: [2, 1], // C, B
+      // Sat-Sun, Fri-Sat, Thu-Fri, Sun-Mon, Tue-Wed
+      restOptions: [[5, 6], [4, 5], [3, 4], [6, 0], [1, 2]],
+      shiftOptions: [1, 2, 3, 4, 0, 5, 6, 7], // B, C, D, E, A, F, G, H
       priority: 'hours',
       noWorkWindow: null
     },
     {
       name: 'Sherie',
-      restOptions: [[6, 0]], // Sun-Mon
-      shiftOptions: [2, 3], // C, D
+      // Sun-Mon, Sat-Sun, Fri-Sat, Thu-Fri, Tue-Wed
+      restOptions: [[6, 0], [5, 6], [4, 5], [3, 4], [1, 2]],
+      shiftOptions: [3, 2, 4, 5, 6, 7, 0, 1], // D, C, E, F, G, H, A, B
       priority: 'rest',
       noWorkWindow: null
     }
@@ -313,16 +324,18 @@
   // Exhaustive search
   // ---------------------------------------------------------------------
   //
-  // Objective: minimise the weighted rank penalty (lower is better), subject
-  // to (a) the hard coverage minimum on all 168 hours and (b) every person's
-  // no-work window. Priority groups follow PROMPT.md:
-  //   - locked: gave an exact start hour (slot fixed by the grid offset)
-  //   - rest-priority: their rest-day pair comes from their ranked list
-  //   - hour-priority: their slot must be one they listed; rest days are free
+  // The candidate domain is OPEN: every person may be assigned any of the 8
+  // slots and any of the 7 consecutive rest-day pairs. Their ranked lists only
+  // say how much they want each option (rank 0 = most wanted; anything they
+  // did not rank is a tied-for-last tier). The two dimensions are independent,
+  // linked only by feasibility.
   //
-  // Two phases: first enforce every rest-priority person's list. If that is
-  // genuinely infeasible (proven by exhausting the space), relax rest-priority
-  // people to any of the 7 pairs and let scoring attribute the compromise.
+  // Hard rules: coverage minimum on all 168 hours; each person's no-work
+  // window; any owed "guarantee" carried over from the previous run (rotation
+  // fairness).
+  //
+  // Soft objective: weighted rank penalty (lower is better). A person's
+  // priority dimension counts heavily, the other lightly.
 
   var ADJACENT_PAIRS = [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [5, 6], [6, 0]];
 
@@ -330,21 +343,49 @@
     return rankOf(person.shiftOptions, slotIndex, 'hours');
   }
 
+  function restRankFor(person, pair) {
+    return rankOf(person.restOptions, pair, 'rest');
+  }
+
   function listLengthFor(person, kind) {
     var list = kind === 'rest' ? person.restOptions : person.shiftOptions;
     return (list || []).length;
   }
 
-  function personPenalty(person, slotIndex, restPair, pw, sw) {
-    var priorityRank, softRank;
-    if (person.priority === 'rest') {
-      priorityRank = rankOf(person.restOptions, restPair, 'rest');
-      softRank = hourRankFor(person, slotIndex);
-    } else {
-      priorityRank = hourRankFor(person, slotIndex);
-      softRank = rankOf(person.restOptions, restPair, 'rest');
+  // The dimension a person marked as their priority is weighted heavily.
+  function slotWeightFor(person, pw, sw) {
+    return person.priority === 'hours' ? pw : sw;
+  }
+  function restWeightFor(person, pw, sw) {
+    return person.priority === 'rest' ? pw : sw;
+  }
+
+  // Is there at least one rest pair that keeps this person's no-work window
+  // safe at the given slot? (Reading A of the window fairness rule.)
+  function slotWindowAllowed(person, slotStart, cfg) {
+    if (!person.noWorkWindow) return true;
+    for (var i = 0; i < ADJACENT_PAIRS.length; i++) {
+      if (satisfiesNoWorkWindow(person, slotStart, ADJACENT_PAIRS[i], cfg)) return true;
     }
-    return pw * priorityRank + sw * softRank;
+    return false;
+  }
+
+  // Rest pairs a person may take at a slot: window-safe, and (if a guarantee
+  // is owed) exactly the guaranteed pair. Sorted most-wanted first.
+  function restOptionsFor(person, slotStart, cfg, forcedPair) {
+    var list = [];
+    for (var i = 0; i < ADJACENT_PAIRS.length; i++) {
+      var pair = ADJACENT_PAIRS[i];
+      if (forcedPair && pairKey(pair) !== pairKey(forcedPair)) continue;
+      if (!satisfiesNoWorkWindow(person, slotStart, pair, cfg)) continue;
+      list.push({
+        pair: pair,
+        rank: restRankFor(person, pair),
+        hours: shiftedHoursOnDays(slotStart, pair, cfg)
+      });
+    }
+    list.sort(function (a, b) { return a.rank - b.rank; });
+    return list;
   }
 
   // Flat Int16 counts over the 168 hour-slots of the week.
@@ -376,42 +417,7 @@
     return grid;
   }
 
-  // Cartesian product over a list of option arrays; cb receives one combined
-  // array. Used for locked + rest-priority rest-day choices.
-  function productOptions(optionLists, cb) {
-    var n = optionLists.length;
-    if (n === 0) { cb([]); return; }
-    var cur = new Array(n);
-    (function rec(i) {
-      if (i === n) { cb(cur.slice()); return; }
-      var list = optionLists[i];
-      for (var j = 0; j < list.length; j++) {
-        cur[i] = list[j];
-        rec(i + 1);
-      }
-    })(0);
-  }
-
-  // All injective assignments of `people` (in order) into distinct `slots`.
-  // Each result carries the priority-dimension penalty sum (pw * hour rank).
-  function permutationsIntoSlots(people, slots, pw) {
-    var n = people.length;
-    var results = [];
-    if (n > slots.length) return results;
-    var used = new Array(slots.length).fill(false);
-    var cur = new Array(n);
-    (function rec(i, sum) {
-      if (i === n) { results.push({ slots: cur.slice(), sum: sum }); return; }
-      for (var s = 0; s < slots.length; s++) {
-        if (used[s]) continue;
-        used[s] = true;
-        cur[i] = slots[s];
-        rec(i + 1, sum + pw * hourRankFor(people[i], slots[s]));
-        used[s] = false;
-      }
-    })(0, 0);
-    return results;
-  }
+  // Slot assignment is enumerated directly inside the search (see attemptGen).
 
   // --- ordered walk of the hour-priority rest-day space -------------------
   // Each person's 7 pairs are visited in ascending rest rank ("bonus" order),
@@ -435,28 +441,7 @@
     return out;
   }
 
-  // Builds, for one hour-priority person, their window-valid pairs at every
-  // slot, each with its rest-day shift hours (the removed hours) and rest rank,
-  // sorted by rank ascending.
-  function buildHourOptions(person, cfg, slots) {
-    var bySlot = [];
-    for (var s = 0; s < cfg.numSlots; s++) {
-      var slotStart = slots[s];
-      var list = [];
-      for (var i = 0; i < ADJACENT_PAIRS.length; i++) {
-        var pair = ADJACENT_PAIRS[i];
-        if (!satisfiesNoWorkWindow(person, slotStart, pair, cfg)) continue;
-        list.push({
-          pair: pair,
-          rank: rankOf(person.restOptions, pair, 'rest'),
-          hours: shiftedHoursOnDays(slotStart, pair, cfg)
-        });
-      }
-      list.sort(function (a, b) { return a.rank - b.rank; });
-      bySlot.push(list);
-    }
-    return bySlot;
-  }
+
 
   // --- progress reporting -------------------------------------------------
   // IMPORTANT: every generator in this file yields the SAME shape of progress
@@ -487,49 +472,55 @@
     }
   }
 
-  // Generator version of the rest-day walk. Every `yield` inside (including
-  // the recursive DFS reached via `yield*`) carries a snapshot.
-  function* bestRestComboGen(baseCounts, hourOptions, slots, cfg, sw, prog) {
-    var k = slots.length;
+  // Assigns a rest pair to every person for a fixed slot assignment, choosing
+  // the combination that minimises the weighted rest-rank penalty while keeping
+  // coverage and every no-work window. Exact depth-first search with a per-hour
+  // capacity prune and a branch-and-bound bound, so it is fast and never skips
+  // a better feasible combination.
+  function* restAssign(slotOf, people, slots, cfg, pw, sw, prog, owed) {
+    var k = people.length;
     prog.restCombos++;
     prog.innerChecked++;
-    if (k === 0) {
-      return coverageOk(baseCounts, cfg.minCoverage) ? { soft: 0, pairs: [] } : null;
-    }
 
-    // Capacity: how many overlapping rest shifts each hour tolerates. A
-    // negative capacity means already below the minimum before any rest.
+    var base = newCounts();
+    for (var i = 0; i < k; i++) {
+      var all = personDutyHours(slots[slotOf[i]], [], cfg);
+      for (var a = 0; a < all.length; a++) base[all[a]] += 1;
+    }
     var capacity = new Int16Array(HOURS_PER_WEEK);
     for (var h = 0; h < HOURS_PER_WEEK; h++) {
-      var c = baseCounts[h] - cfg.minCoverage;
+      var c = base[h] - cfg.minCoverage;
       if (c < 0) return null;
       capacity[h] = c;
     }
 
     var options = new Array(k);
-    for (var i = 0; i < k; i++) {
-      options[i] = hourOptions[i][slots[i]];
-      if (!options[i] || options[i].length === 0) return null;
+    var weights = new Array(k);
+    for (var j = 0; j < k; j++) {
+      var person = people[j];
+      var forced = (owed && owed[j] && owed[j].pair) ? owed[j].pair : null;
+      options[j] = restOptionsFor(person, slots[slotOf[j]], cfg, forced);
+      if (options[j].length === 0) return null;
+      weights[j] = restWeightFor(person, pw, sw);
     }
 
-    // Admissible lower bound on the remaining bonus.
     var lb = new Array(k + 1);
     lb[k] = 0;
-    for (var j = k - 1; j >= 0; j--) lb[j] = lb[j + 1] + options[j][0].rank;
+    for (var b = k - 1; b >= 0; b--) lb[b] = lb[b + 1] + weights[b] * options[b][0].rank;
 
     var removals = new Int16Array(HOURS_PER_WEEK);
-    var bestBonus = Infinity;
+    var bestCost = Infinity;
     var bestPairs = null;
     var cur = new Array(k);
 
-    function* dfs(idx, bonus) {
-      if (idx === k) { bestBonus = bonus; bestPairs = cur.slice(); return; }
-      if (bonus + sw * lb[idx] >= bestBonus) return;
+    function* dfs(idx, cost) {
+      if (idx === k) { bestCost = cost; bestPairs = cur.slice(); return; }
+      if (cost + lb[idx] >= bestCost) return;
       var list = options[idx];
       for (var x = 0; x < list.length; x++) {
         var opt = list[x];
-        var newBonus = bonus + sw * opt.rank;
-        if (newBonus + sw * lb[idx + 1] >= bestBonus) break; // ranks ascend
+        var nc = cost + weights[idx] * opt.rank;
+        if (nc + lb[idx + 1] >= bestCost) break; // ranks ascend
         var hrs = opt.hours;
         var ok = true;
         for (var m = 0; m < hrs.length; m++) {
@@ -538,7 +529,7 @@
         if (!ok) continue;
         for (var n = 0; n < hrs.length; n++) removals[hrs[n]]++;
         cur[idx] = opt.pair;
-        yield* dfs(idx + 1, newBonus);
+        yield* dfs(idx + 1, nc);
         for (var q = 0; q < hrs.length; q++) removals[hrs[q]]--;
         yield* yieldTick(prog);
       }
@@ -547,181 +538,170 @@
     yield* dfs(0, 0);
 
     if (!bestPairs) return null;
-    return { soft: bestBonus, pairs: bestPairs };
+    return { cost: bestCost, pairs: bestPairs };
   }
 
   // One full search pass, as a generator so it can be time-sliced. Returns
-  // either a failure marker or the best result. `prog` carries both progress
-  // counters and the run statistics.
-  function* attemptGen(people, cfg, pw, sw, allowAllRestPriorityPairs, prog) {
+  // either "no feasible schedule" or the collected top-scoring assignments.
+  //
+  // Slot selection:
+  //   - anyone with a no-work window is given their least-preferred WORKABLE
+  //     slot (Reading A): least-preferred first, first arrangement that yields
+  //     any feasible schedule wins;
+  //   - anyone owed a slot guarantee (rotation fairness) is pinned there;
+  //   - everyone else is permuted over the remaining slots.
+  // Rest selection is then an exact per-assignment search (restAssign).
+  function* attemptGen(people, cfg, pw, sw, owed, prog) {
     var counters = prog;
-    var restPriority = [], hourPriority = [];
-    people.forEach(function (p) {
-      if (p.priority === 'rest') restPriority.push(p);
-      else hourPriority.push(p);
-    });
-
-    // The grid is fixed: the eight slots always start at 0, 3, 6, ... 21.
-    var offset = 0;
     var slots = computeSlots(cfg, 0);
+    var n = people.length;
 
-    var available = [];
-    for (var s = 0; s < cfg.numSlots; s++) available.push(s);
+    var fixedBase = {};   // person index -> slot, from rotation guarantees
+    var windowIdx = [];
+    for (var i0 = 0; i0 < n; i0++) {
+      var p0 = people[i0];
+      if (p0.noWorkWindow) windowIdx.push(i0);
+      else if (owed && owed[i0] && owed[i0].slot != null) fixedBase[i0] = owed[i0].slot;
+    }
 
-    var rpOptions = restPriority.map(function (p) {
-      if (allowAllRestPriorityPairs) return ADJACENT_PAIRS;
-      return (p.restOptions && p.restOptions.length) ? p.restOptions : ADJACENT_PAIRS;
-    });
-
-    // Optimistic lower bound on the hour-priority priority-dimension penalty,
-    // used by branch-and-bound. Every hour-priority person could at best reach
-    // their lowest-ranked reachable slot.
-    var globalInnerLB = 0;
-    hourPriority.forEach(function (p) {
-      var best = Infinity;
-      for (var si2 = 0; si2 < cfg.numSlots; si2++) {
-        var r = hourRankFor(p, si2);
-        if (r < best) best = r;
+    // Least-preferred-first list of workable slots for a window person.
+    function windowCandidates(idx) {
+      var person = people[idx], arr = [];
+      for (var s = 0; s < cfg.numSlots; s++) {
+        if (slotWindowAllowed(person, slots[s], cfg)) arr.push(s);
       }
-      globalInnerLB += pw * best;
-    });
-
-    // 2. Enumerate outer arrangements: rest-priority slots + their rest-day
-    //    choices. The rest-priority dimensions are requirements.
-    var outers = [];
-    (function recRestPriority(i, chosenSlots, chosenIdx) {
-      if (i === restPriority.length) {
-        productOptions(rpOptions, function (pairs) {
-          var fixed = [];
-          var penalty = 0;
-          var windowsOk = true;
-          for (var b = 0; b < restPriority.length; b++) {
-            var p = restPriority[b], pair2 = pairs[b], slot = chosenSlots[b];
-            fixed.push({ person: p, slotIndex: slot, slotStart: slots[slot], restDays: pair2 });
-            penalty += personPenalty(p, slot, pair2, pw, sw);
-            if (!satisfiesNoWorkWindow(p, slots[slot], pair2, cfg)) windowsOk = false;
-          }
-          var remaining = available.filter(function (sl) { return chosenSlots.indexOf(sl) < 0; });
-          outers.push({ fixed: fixed, remaining: remaining, penalty: penalty, windowsOk: windowsOk });
-        });
-        return;
-      }
-      for (var sIdx = 0; sIdx < available.length; sIdx++) {
-        if (chosenIdx.indexOf(sIdx) >= 0) continue;
-        chosenIdx.push(sIdx);
-        chosenSlots.push(available[sIdx]);
-        recRestPriority(i + 1, chosenSlots, chosenIdx);
-        chosenSlots.pop();
-        chosenIdx.pop();
-      }
-    })(0, [], []);
-
-    // Window-valid rest options for each hour-priority person at every slot,
-    // computed once (used by the ordered rest-day walk).
-    var hourOptions = hourPriority.map(function (p) { return buildHourOptions(p, cfg, slots); });
-
-    // 5. Branch-and-bound: best outer arrangements first.
-    outers.sort(function (a, b) { return a.penalty - b.penalty; });
+      arr.sort(function (a, b) {
+        var ra = rankOf(person.shiftOptions, a, 'hours');
+        var rb = rankOf(person.shiftOptions, b, 'hours');
+        if (rb !== ra) return rb - ra;  // higher rank = less wanted, tried first
+        return b - a;                    // tie-break: later letter first
+      });
+      return arr;
+    }
+    var winCands = windowIdx.map(windowCandidates);
+    for (var w0 = 0; w0 < winCands.length; w0++) {
+      if (winCands[w0].length === 0) return { best: Infinity, counters: counters };
+    }
 
     var best = Infinity;
-    // All distinct top-scoring assignments seen so far, keyed by person->slot.
     var ties = new Map();
 
-    // Build one canonical assignment (in slot order) for a candidate.
-    function buildEntries(fixedList, permSlots, pairs) {
-      var entries = [];
-      fixedList.forEach(function (e) {
-        entries.push({
-          person: e.person, name: e.person.name, slotIndex: e.slotIndex,
-          slotStart: e.slotStart, restDays: e.restDays.slice()
-        });
-      });
-      for (var hi = 0; hi < hourPriority.length; hi++) {
-        var hp = hourPriority[hi];
-        entries.push({
-          person: hp, name: hp.name, slotIndex: permSlots[hi],
-          slotStart: slots[permSlots[hi]], restDays: pairs[hi].slice()
-        });
-      }
-      entries.sort(function (a, b) { return a.slotIndex - b.slotIndex; });
-      return entries;
-    }
-
-    // A key that depends only on who holds which slot (not on array order).
-    function mapKey(fixedList, permSlots) {
-      var pairs = [];
-      fixedList.forEach(function (e) { pairs.push(e.person.name + ':' + e.slotIndex); });
-      for (var hi = 0; hi < hourPriority.length; hi++) {
-        pairs.push(hourPriority[hi].name + ':' + permSlots[hi]);
-      }
-      pairs.sort();
-      return pairs.join('|');
-    }
-
-    function recordTie(fixedList, permSlots, pairs) {
+    function recordTie(slotOf, pairs) {
       if (ties.size >= MAX_TIES) return;
-      var key = mapKey(fixedList, permSlots);
+      var parts = [], entries = [];
+      for (var t = 0; t < n; t++) {
+        parts.push(people[t].name + ':' + slotOf[t]);
+        entries.push({
+          person: people[t], name: people[t].name, slotIndex: slotOf[t],
+          slotStart: slots[slotOf[t]], restDays: pairs[t].slice()
+        });
+      }
+      parts.sort();
+      var key = parts.join('|');
       if (ties.has(key)) return;
-      ties.set(key, { key: key, entries: buildEntries(fixedList, permSlots, pairs) });
+      entries.sort(function (a, b) { return a.slotIndex - b.slotIndex; });
+      ties.set(key, { key: key, entries: entries });
     }
 
-    prog.totalOuter = outers.length;
+    function factorial(m) { var f = 1; for (var z = 2; z <= m; z++) f *= z; return f; }
 
-    for (var oi = 0; oi < outers.length; oi++) {
-      var outer = outers[oi];
-      counters.outers++;
-      prog.outerChecked = counters.outers;
-      prog.hasBest = best < Infinity;
-      // Once per outer arrangement, always the same snapshot shape.
-      yield makeSnapshot(prog);
-      // Safe cut: outer penalty is non-decreasing along this sorted order and
-      // globalInnerLB <= any actual inner penalty, so nothing later can beat or
-      // tie the current best (strict > keeps equal-scoring arrangements).
-      if (outer.penalty + globalInnerLB > best) break;
-      if (!outer.windowsOk) continue;
-
-      var outerBase = newCounts();
-      outer.fixed.forEach(function (e) { addEntryCounts(outerBase, e.slotStart, e.restDays, cfg); });
-
-      // 4. Hour-priority slot permutations, best satisfaction first.
-      var perms = permutationsIntoSlots(hourPriority, outer.remaining, pw);
-      perms.sort(function (a, b) { return a.sum - b.sum; });
-
-      for (var pi = 0; pi < perms.length; pi++) {
-        var perm = perms[pi];
-        counters.innerPerms++;
-        // Safe cut: perms are sorted, and rest-soft penalty is never negative.
-        // Strict > so that equal-scoring permutations are still examined.
-        if (outer.penalty + perm.sum > best) break;
-
-        // Base counts assume every hour-priority person works all 7 days; the
-        // rest-day walk then subtracts each chosen pair's 9-hour shifts.
-        var base = outerBase.slice();
-        for (var bi = 0; bi < hourPriority.length; bi++) {
-          var allDays = personDutyHours(slots[perm.slots[bi]], [], cfg);
-          for (var bh = 0; bh < allDays.length; bh++) base[allDays[bh]] += 1;
-        }
-
-        var combo = yield* bestRestComboGen(base, hourOptions, perm.slots, cfg, sw, prog);
-        if (!combo) continue;
-        var total = outer.penalty + perm.sum + combo.soft;
-        if (total < best) {
-          best = total;
-          ties.clear();
-          recordTie(outer.fixed, perm.slots, combo.pairs);
-        } else if (total === best) {
-          recordTie(outer.fixed, perm.slots, combo.pairs);
+    // Search all arrangements that pin the given slots (person index -> slot).
+    function* searchFixed(fixedSlots) {
+      var used = new Array(cfg.numSlots).fill(false);
+      var freeIdx = [], freeSlots = [];
+      var clash = false;
+      for (var k = 0; k < n; k++) {
+        if (fixedSlots[k] != null) {
+          if (used[fixedSlots[k]]) clash = true;
+          else used[fixedSlots[k]] = true;
+        } else {
+          freeIdx.push(k);
         }
       }
+      if (clash) return false;
+      for (var s = 0; s < cfg.numSlots; s++) if (!used[s]) freeSlots.push(s);
+      if (freeIdx.length !== freeSlots.length) return false;
+
+      prog.totalOuter = factorial(freeSlots.length);
+      var slotOf = new Array(n);
+      for (var k2 = 0; k2 < n; k2++) if (fixedSlots[k2] != null) slotOf[k2] = fixedSlots[k2];
+
+      var localFeasible = false;
+
+      function* perm(ci, usedSlots) {
+        if (ci === freeIdx.length) {
+          counters.innerPerms++;
+          counters.outers++;
+          prog.outerChecked = counters.outers;
+          prog.hasBest = best < Infinity;
+          yield makeSnapshot(prog);
+
+          var slotCost = 0;
+          for (var a = 0; a < n; a++) {
+            slotCost += slotWeightFor(people[a], pw, sw) *
+              rankOf(people[a].shiftOptions, slotOf[a], 'hours');
+          }
+          if (slotCost > best) return;
+          var res = yield* restAssign(slotOf, people, slots, cfg, pw, sw, prog, owed);
+          if (!res) return;
+          var total = slotCost + res.cost;
+          if (total < best) {
+            best = total;
+            ties.clear();
+            recordTie(slotOf, res.pairs);
+            localFeasible = true;
+          } else if (total === best) {
+            recordTie(slotOf, res.pairs);
+            localFeasible = true;
+          }
+          return;
+        }
+        var idx = freeIdx[ci];
+        for (var s2 = 0; s2 < freeSlots.length; s2++) {
+          if (usedSlots[s2]) continue;
+          usedSlots[s2] = true;
+          slotOf[idx] = freeSlots[s2];
+          yield* perm(ci + 1, usedSlots);
+          usedSlots[s2] = false;
+        }
+      }
+      yield* perm(0, new Array(freeSlots.length).fill(false));
+      return localFeasible;
     }
+
+    // Enumerate window-slot combinations least-preferred-first; the first that
+    // yields a feasible schedule is the one the window rule selects.
+    var stopped = false;
+    function* winCombo(wi, chosen) {
+      if (stopped) return;
+      if (wi === windowIdx.length) {
+        var fixed = {};
+        for (var kk in fixedBase) fixed[kk] = fixedBase[kk];
+        for (var c = 0; c < windowIdx.length; c++) fixed[windowIdx[c]] = chosen[c];
+        var feasible = yield* searchFixed(fixed);
+        if (feasible) stopped = true;
+        return;
+      }
+      var cands = winCands[wi];
+      for (var ci = 0; ci < cands.length; ci++) {
+        if (stopped) return;
+        var slot = cands[ci];
+        var taken = false;
+        for (var kk2 in fixedBase) if (fixedBase[kk2] === slot) taken = true;
+        if (taken) continue;
+        chosen.push(slot);
+        yield* winCombo(wi + 1, chosen);
+        chosen.pop();
+      }
+    }
+    yield* winCombo(0, []);
 
     if (ties.size === 0) return { best: Infinity, counters: counters };
-
     return {
       best: best,
       ties: Array.from(ties.values()),
       counters: counters,
-      offset: offset,
+      offset: 0,
       slots: slots,
       people: people
     };
@@ -749,8 +729,8 @@
     };
   }
 
-  // The whole solve (both phases) as a generator. Its yielded values are the
-  // progress snapshots; its return value is the final result.
+  // The whole solve as a generator (a single open-domain pass). Its yielded
+  // values are the progress snapshots; its return value is the final result.
   function* solveGen(people, cfg, opts) {
     cfg = cfg || config;
     opts = opts || {};
@@ -761,17 +741,31 @@
     var prog = makeProgress('strict');
     prog.yieldEvery = (typeof opts.yieldEvery === 'number' && opts.yieldEvery > 0)
       ? opts.yieldEvery : YIELD_EVERY;
-    var result = yield* attemptGen(people, cfg, pw, sw, false, prog);
+    var owed = opts.owed || null;
 
-    var phase = 'strict';
-    if (result.best === Infinity) {
-      // Fallback: relax rest-priority people to any of the 7 pairs.
-      prog.phase = 'relaxed';
-      prog.hasBest = false;
-      result = yield* attemptGen(people, cfg, pw, sw, true, prog);
-      phase = 'relaxed';
+    // Rotation guarantees (§5). When any are owed we first try to honour all
+    // of them; if that is infeasible we fall back to the largest feasible
+    // subset (see solveWithFallback). `owed` absent/null => the old path,
+    // unchanged.
+    var guarantees = buildGuarantees(people, owed);
+    var fallback = null;
+    var result;
+    if (guarantees.length > 0) {
+      fallback = yield* solveWithFallback(people, cfg, pw, sw, owed, guarantees, prog);
+      result = fallback.attempt;
+    } else {
+      result = yield* attemptGen(people, cfg, pw, sw, owed, prog);
     }
+
     if (result.best === Infinity) return { ok: false, error: 'infeasible', elapsedMs: Date.now() - t0 };
+
+    // Attribute every owed guarantee as satisfied or dropped. Only produced
+    // when the caller actually supplied `opts.owed`, so a run without rotation
+    // history keeps exactly its previous result shape.
+    var guaranteeReport = null;
+    if (owed) {
+      guaranteeReport = buildGuaranteeReport(guarantees, fallback);
+    }
 
     // Tie-break. All top-scoring assignments were collected during the search.
     // Sort them by a name-based key so the outcome does not depend on the order
@@ -851,7 +845,7 @@
       };
     });
 
-    return {
+    var out = {
       ok: true,
       offset: result.offset,
       slots: result.slots,
@@ -862,7 +856,7 @@
       maxCoverage: max,
       totalPersonHours: totalHours,
       exactlyBalanced: min === max,
-      phase: phase,
+      phase: 'open-domain',
       tie: tieInfo,
       stats: {
         outers: prog.outers,
@@ -872,6 +866,8 @@
       },
       elapsedMs: Date.now() - t0
     };
+    if (guaranteeReport) out.guarantees = guaranteeReport;
+    return out;
   }
 
   // Synchronous solver: drain the generator fully (tests, Node, verify.js).
@@ -911,6 +907,323 @@
   }
 
   // ---------------------------------------------------------------------
+  // Cross-run fairness ("rotation", §5)
+  // ---------------------------------------------------------------------
+  //
+  // History shape (JSON-serialisable, versioned):
+  //
+  //   {
+  //     version: 1,
+  //     runs: [ runRecord, ... ],   // most recent last, capped at MAX_HISTORY_RUNS
+  //     streaks: {
+  //       "<person name>": { slot: <n>, rest: <n> }   // consecutive misses
+  //     }
+  //   }
+  //
+  //   runRecord = {
+  //     at: <ISO 8601 string>,
+  //     entries: [ {
+  //       name:        <string>,
+  //       slotHit:     <bool>,  // assigned slot === their #1 slot
+  //       restHit:     <bool>,  // assigned rest pair === their #1 rest pair
+  //       slotTracked: <bool>,  // false => slot dimension exempt from rotation
+  //                             //          (no #1 slot, or a no-work window)
+  //       restTracked: <bool>   // false => person has no #1 rest pair
+  //     } ]
+  //   }
+  //
+  // Untracked dimensions are recorded as hits and never increment a streak, so
+  // they can never create rotation debt. Window people are exempt from SLOT
+  // debt (their §4 least-preferred-slot rule is already their fairness
+  // mechanism); their REST dimension participates normally.
+
+  var HISTORY_VERSION = 1;
+  var MAX_HISTORY_RUNS = 50;
+
+  // Exact subset enumeration is used up to and including this many guarantees;
+  // beyond it we switch to a documented greedy drop (see solveWithFallback).
+  var SUBSET_ENUM_MAX = 12;
+
+  // Does this person have a #1 for the dimension, and is the dimension tracked
+  // for rotation at all?
+  function slotTrackedFor(person) {
+    return !!(person && person.shiftOptions && person.shiftOptions.length > 0) &&
+      !(person && person.noWorkWindow);
+  }
+  function restTrackedFor(person) {
+    return !!(person && person.restOptions && person.restOptions.length > 0);
+  }
+
+  // Snapshot one run's hit/miss per person per dimension.
+  function buildRunRecord(assignment, people) {
+    var byName = {};
+    (people || []).forEach(function (p) { byName[p.name] = p; });
+    var list = Array.isArray(assignment)
+      ? assignment
+      : (assignment && assignment.assignment) || [];
+
+    var entries = list.map(function (a) {
+      var p = byName[a.name];
+      var slotFirst = (p && p.shiftOptions) ? p.shiftOptions[0] : undefined;
+      var restFirst = (p && p.restOptions) ? p.restOptions[0] : undefined;
+      var slotTracked = slotTrackedFor(p);
+      var restTracked = restTrackedFor(p);
+      var slotHit = slotTracked ? (a.slotIndex === slotFirst) : true;
+      var restHit = restTracked ? (pairKey(a.restDays) === pairKey(restFirst)) : true;
+      return {
+        name: a.name,
+        slotHit: slotHit,
+        restHit: restHit,
+        slotTracked: slotTracked,
+        restTracked: restTracked
+      };
+    });
+
+    return { at: new Date().toISOString(), entries: entries };
+  }
+
+  // Who is owed a guarantee going into the next run, derived from the last
+  // recorded run plus the carried-forward streaks.
+  //   - slot debt only for non-window people who missed their #1 slot;
+  //   - rest debt for anyone (window people included) who missed their #1 pair;
+  //   - streaks are the current consecutive-miss counts (0 if none/hit).
+  function computeOwed(history, people) {
+    var streaks = (history && history.streaks) || {};
+    var runs = (history && history.runs) || [];
+    var last = runs.length ? runs[runs.length - 1] : null;
+    var lastByName = {};
+    if (last) (last.entries || []).forEach(function (e) { lastByName[e.name] = e; });
+
+    var owed = [];
+    var list = [];
+
+    for (var i = 0; i < people.length; i++) {
+      var p = people[i];
+      var name = p.name;
+      var st = streaks[name] || { slot: 0, rest: 0 };
+      var slotStreak = st.slot || 0;
+      var pairStreak = st.rest || 0;
+      var slotDebt = null;
+      var pairDebt = null;
+      var e = lastByName[name];
+
+      if (p.noWorkWindow) {
+        // §4 already gives window people their least-preferred feasible slot
+        // every run; never owe them a slot and never track their slot streak.
+        slotStreak = 0;
+      } else {
+        var slotFirst = (p.shiftOptions || [])[0];
+        if (e && e.slotTracked !== false && slotFirst != null && !e.slotHit) {
+          slotDebt = slotFirst;
+        }
+      }
+
+      var restFirst = (p.restOptions || [])[0];
+      if (e && e.restTracked !== false && restFirst != null && !e.restHit) {
+        pairDebt = restFirst;
+      }
+
+      owed.push({
+        slot: slotDebt,
+        pair: pairDebt,
+        slotStreak: slotStreak,
+        pairStreak: pairStreak
+      });
+
+      if (slotDebt != null) {
+        list.push(name + ' missed their #1 slot ' + SLOT_LETTERS[slotDebt] + ' for ' +
+          slotStreak + ' run' + (slotStreak === 1 ? '' : 's') +
+          ' in a row; it is guaranteed this run.');
+      }
+      if (pairDebt != null) {
+        list.push(name + ' missed their #1 rest pair ' +
+          restDayNames(pairDebt).join('-') + ' for ' + pairStreak +
+          ' run' + (pairStreak === 1 ? '' : 's') +
+          ' in a row; it is guaranteed this run.');
+      }
+    }
+
+    return { owed: owed, list: list };
+  }
+
+  // Immutably fold one run record into the history: advance each person's
+  // consecutive-miss streaks and keep a bounded list of recent runs.
+  function appendHistory(history, runRecord) {
+    history = history || {};
+    var oldStreaks = history.streaks || {};
+    var oldRuns = history.runs || [];
+
+    var streaks = {};
+    Object.keys(oldStreaks).forEach(function (n) {
+      streaks[n] = { slot: oldStreaks[n].slot || 0, rest: oldStreaks[n].rest || 0 };
+    });
+
+    (runRecord.entries || []).forEach(function (e) {
+      var cur = streaks[e.name] || { slot: 0, rest: 0 };
+      var slotTracked = e.slotTracked !== false;
+      var restTracked = e.restTracked !== false;
+      cur.slot = slotTracked ? (e.slotHit ? 0 : (cur.slot || 0) + 1) : 0;
+      cur.rest = restTracked ? (e.restHit ? 0 : (cur.rest || 0) + 1) : 0;
+      streaks[e.name] = cur;
+    });
+
+    var runs = oldRuns.concat([runRecord]);
+    if (runs.length > MAX_HISTORY_RUNS) runs = runs.slice(runs.length - MAX_HISTORY_RUNS);
+
+    return { version: HISTORY_VERSION, runs: runs, streaks: streaks };
+  }
+
+  // Flatten `opts.owed` into an explicit guarantee list, skipping slot
+  // guarantees for window people (the solver never honours those anyway).
+  function buildGuarantees(people, owed) {
+    var g = [];
+    if (!owed) return g;
+    for (var i = 0; i < people.length; i++) {
+      var o = owed[i];
+      if (!o) continue;
+      var p = people[i];
+      if (!p.noWorkWindow && o.slot != null) {
+        g.push({ index: i, name: p.name, dimension: 'slot', value: o.slot, streak: o.slotStreak || 0 });
+      }
+      if (o.pair != null) {
+        g.push({ index: i, name: p.name, dimension: 'rest', value: o.pair, streak: o.pairStreak || 0 });
+      }
+    }
+    return g;
+  }
+
+  // A copy of `owed` carrying only the guarantees whose bit is set in `mask`.
+  function owedForMask(owed, guarantees, mask) {
+    var out = new Array(owed.length);
+    for (var i = 0; i < owed.length; i++) {
+      var o = owed[i] || {};
+      out[i] = {
+        slot: null, pair: null,
+        slotStreak: o.slotStreak || 0, pairStreak: o.pairStreak || 0
+      };
+    }
+    for (var g = 0; g < guarantees.length; g++) {
+      if (!(mask & (1 << g))) continue;
+      var gu = guarantees[g];
+      if (gu.dimension === 'slot') out[gu.index].slot = gu.value;
+      else out[gu.index].pair = gu.value;
+    }
+    return out;
+  }
+
+  function popcount(mask) {
+    var c = 0;
+    while (mask) { c += mask & 1; mask >>>= 1; }
+    return c;
+  }
+  function totalStreak(guarantees, mask) {
+    var t = 0;
+    for (var g = 0; g < guarantees.length; g++) if (mask & (1 << g)) t += guarantees[g].streak;
+    return t;
+  }
+
+  // Subset order: most guarantees kept first, then longest total miss-streak,
+  // then the numeric mask as a deterministic final tie-break.
+  function compareMasks(guarantees) {
+    return function (a, b) {
+      var pa = popcount(a), pb = popcount(b);
+      if (pa !== pb) return pb - pa;
+      var sa = totalStreak(guarantees, a), sb = totalStreak(guarantees, b);
+      if (sa !== sb) return sb - sa;
+      return a - b;
+    };
+  }
+
+  // Given all owed guarantees, find the feasible run that keeps the most of
+  // them (exact subset search for <= SUBSET_ENUM_MAX guarantees, otherwise a
+  // bounded greedy drop). The windows and the open domain are untouched; only
+  // which guarantees are pinned changes.
+  //
+  // Returns { attempt, mask, attempts } where `attempt` is an attemptGen
+  // result and `mask` marks the kept guarantees (-1 when nothing was feasible,
+  // including the no-guarantee base problem).
+  function* solveWithFallback(people, cfg, pw, sw, owed, guarantees, prog) {
+    var G = guarantees.length;
+    var attempts = 0;
+
+    function* runMask(mask) {
+      var subset = owedForMask(owed, guarantees, mask);
+      return yield* attemptGen(people, cfg, pw, sw, subset, prog);
+    }
+
+    if (G <= SUBSET_ENUM_MAX) {
+      var masks = [];
+      for (var m = 1; m < (1 << G); m++) masks.push(m);
+      masks.push(0); // last resort: drop everything (the plain base problem)
+      masks.sort(compareMasks(guarantees));
+      for (var mi = 0; mi < masks.length; mi++) {
+        attempts++;
+        var res = yield* runMask(masks[mi]);
+        yield makeSnapshot(prog);
+        if (res && res.best !== Infinity) {
+          return { attempt: res, mask: masks[mi], attempts: attempts };
+        }
+      }
+      return { attempt: { best: Infinity }, mask: -1, attempts: attempts };
+    }
+
+    // Greedy fallback (> SUBSET_ENUM_MAX guarantees): keep trying the current
+    // set, and whenever it is infeasible drop the guarantee with the shortest
+    // streak (ties: the later-listed guarantee), until a feasible set is found
+    // or only the base problem remains.
+    var kept = [];
+    for (var k = 0; k < G; k++) kept.push(true);
+    while (true) {
+      var mask = 0;
+      for (var k2 = 0; k2 < G; k2++) if (kept[k2]) mask |= (1 << k2);
+      attempts++;
+      var fres = yield* runMask(mask);
+      yield makeSnapshot(prog);
+      if (fres && fres.best !== Infinity) {
+        return { attempt: fres, mask: mask, attempts: attempts };
+      }
+      var anyKept = false;
+      for (var kk = 0; kk < G; kk++) if (kept[kk]) anyKept = true;
+      if (!anyKept) break;
+      var dropIdx = -1, dropStreak = Infinity;
+      for (var d = 0; d < G; d++) {
+        if (!kept[d]) continue;
+        var s = guarantees[d].streak;
+        if (s < dropStreak || (s === dropStreak && d > dropIdx)) { dropStreak = s; dropIdx = d; }
+      }
+      if (dropIdx < 0) break;
+      kept[dropIdx] = false;
+    }
+    return { attempt: { best: Infinity }, mask: -1, attempts: attempts };
+  }
+
+  // Build the report attached to a successful result.
+  function buildGuaranteeReport(guarantees, fallback) {
+    var keptMask = fallback ? fallback.mask : 0;
+    var satisfied = [];
+    var dropped = [];
+    for (var g = 0; g < guarantees.length; g++) {
+      var gu = guarantees[g];
+      var base = { name: gu.name, dimension: gu.dimension, value: gu.value, streak: gu.streak };
+      if (fallback && keptMask >= 0 && (keptMask & (1 << g))) {
+        satisfied.push(base);
+      } else {
+        base.reason = 'could not be satisfied alongside the other guarantees, hard coverage, and no-work windows';
+        dropped.push(base);
+      }
+    }
+    return {
+      owed: guarantees.map(function (g) {
+        return { name: g.name, dimension: g.dimension, value: g.value, streak: g.streak };
+      }),
+      satisfied: satisfied,
+      dropped: dropped,
+      method: (guarantees.length > SUBSET_ENUM_MAX) ? 'greedy' : 'exact-subset',
+      attempts: fallback ? fallback.attempts : 0
+    };
+  }
+
+  // ---------------------------------------------------------------------
   // Public surface
   // ---------------------------------------------------------------------
 
@@ -943,7 +1256,15 @@
     satisfiesNoWorkWindow: satisfiesNoWorkWindow,
     scoreAssignment: scoreAssignment,
     solve: solve,
-    solveAsync: solveAsync
+    solveAsync: solveAsync,
+
+    // cross-run fairness (rotation)
+    HISTORY_VERSION: HISTORY_VERSION,
+    MAX_HISTORY_RUNS: MAX_HISTORY_RUNS,
+    SUBSET_ENUM_MAX: SUBSET_ENUM_MAX,
+    buildRunRecord: buildRunRecord,
+    computeOwed: computeOwed,
+    appendHistory: appendHistory
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = Scheduler;
