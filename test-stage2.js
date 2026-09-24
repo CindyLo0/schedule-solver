@@ -50,11 +50,12 @@ var daph = null;
 res.assignment.forEach(function (a) { if (a.name === 'Daphine') daph = a; });
 var daphPerson = S.defaultPeople.filter(function (p) { return p.name === 'Daphine'; })[0];
 check('Daphine present', !!daph);
-// Current open-domain result: Daphine takes slot B (03:00), her least-preferred
-// slot, and rest pair Sat-Sun, which still keeps her out of her no-work window.
-check('Daphine gets slot B', daph && daph.slotLetter === 'B');
-check('Daphine starts at 03:00', daph && daph.slotStart === 3);
-check('Daphine rests Sat-Sun', daph && S.pairKey(daph.restDays) === S.pairKey([5, 6]));
+// Current open-domain result: Daphine takes slot H (21:00), the workable slot
+// the REST of the team least wants (highest sum of their ranks), and rest pair
+// Fri-Sat, which still keeps her out of her no-work window.
+check('Daphine gets slot H', daph && daph.slotLetter === 'H');
+check('Daphine starts at 21:00', daph && daph.slotStart === 21);
+check('Daphine rests Fri-Sat', daph && S.pairKey(daph.restDays) === S.pairKey([4, 5]));
 check('Daphine is never on duty inside her no-work window',
       daph && S.satisfiesNoWorkWindow(daphPerson, daph.slotStart, daph.restDays, config) === true);
 
@@ -85,9 +86,10 @@ console.log('     - every person may take any of cfg.numSlots slots and any of')
 console.log('       the 7 consecutive rest pairs, even ones they did not rank;');
 console.log('     - hard coverage on all 168 hours and each no-work window;');
 console.log('     - weighted rank penalty (priority dimension * 100, other * 1);');
-console.log('     - window people are pinned to the first (least-preferred)');
-console.log('       workable slot combination that admits a feasible schedule,');
-console.log('       exactly as the solver does. No pruning or ordering shortcuts.');
+console.log('     - window people are pinned to the first workable slot the REST');
+console.log('       of the team least wants (most-disliked first) that admits a');
+console.log('       feasible schedule, exactly as the solver does. No pruning or');
+console.log('       ordering shortcuts.');
 // =====================================================================
 
 // ---- independent brute force (no pruning, no ordering) ----------------
@@ -142,17 +144,25 @@ function slotWorkableManual(person, slotStart, cfg) {
   return false;
 }
 
-// position of each workable slot in the solver's least-preferred-first order
-// (greater rank first, later letter first). Missing => not workable.
-function windowOrderMap(person, slots, cfg) {
+// position of each workable slot in the solver's most-disliked-by-others-first
+// order (greater sum of the OTHER people's ranks first, later letter first).
+// Missing => not workable.
+function windowOrderMap(person, people, personIdx, slots, cfg) {
   var workable = [];
   for (var s = 0; s < cfg.numSlots; s++) {
     if (slotWorkableManual(person, slots[s], cfg)) workable.push(s);
   }
+  function dislike(s) {
+    var sum = 0;
+    for (var p = 0; p < people.length; p++) {
+      if (p === personIdx) continue;
+      sum += rankManual(people[p].shiftOptions, s, 'hours');
+    }
+    return sum;
+  }
   workable.sort(function (a, b) {
-    var ra = rankManual(person.shiftOptions, a, 'hours');
-    var rb = rankManual(person.shiftOptions, b, 'hours');
-    if (rb !== ra) return rb - ra;
+    var da = dislike(a), db = dislike(b);
+    if (db !== da) return db - da;
     return b - a;
   });
   var map = {};
@@ -173,7 +183,7 @@ function bruteSolve(people, cfg) {
 
   var windowIdx = [];
   people.forEach(function (p, i) { if (p.noWorkWindow) windowIdx.push(i); });
-  var orderMaps = windowIdx.map(function (i) { return windowOrderMap(people[i], slots, cfg); });
+  var orderMaps = windowIdx.map(function (i) { return windowOrderMap(people[i], people, i, slots, cfg); });
   for (var w = 0; w < orderMaps.length; w++) {
     if (Object.keys(orderMaps[w]).length === 0) return { ok: false, error: 'infeasible' };
   }

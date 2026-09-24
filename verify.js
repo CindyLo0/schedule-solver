@@ -202,13 +202,14 @@ function main(result) {
   assert(shiftProblems.length === 0, 'all shifts are 9 clean consecutive hours',
     shiftProblems.join('; '));
 
-  // 5. No-work-window rule (Reading A) ----------------------------------
-  section('5. No-work-window rule (Reading A)');
-  console.log('      Condition used: assigned slot must be the maximal workable');
-  console.log('      (rank, letter) combination (greater rank first, later letter');
-  console.log('      first). If that fails, the simple sufficient condition is');
-  console.log('      accepted: assigned is workable, unranked (rank === list');
-  console.log('      length), and no later unranked slot is workable.');
+  // 5. No-work-window rule (the slot the rest of the team least wants) ---
+  section('5. No-work-window rule (the slot the rest of the team least wants)');
+  console.log('      Condition used: the assigned slot must be workable, no workable');
+  console.log('      slot may have a strictly greater dislike (sum of the OTHER');
+  console.log('      people\'s ranks for that slot), and no workable slot tied on that');
+  console.log('      dislike may have a later letter (tie-break: later letter first).');
+  console.log('      A strictly-more-disliked workable slot that could not be covered');
+  console.log('      is allowed to be skipped.');
   var windowPeople = defaultPeople.filter(function (p) { return p.noWorkWindow; });
   var windowProblems = [];
   windowPeople.forEach(function (person) {
@@ -222,7 +223,17 @@ function main(result) {
     if (!respected) windowProblems.push(person.name + ': satisfiesNoWorkWindow false');
     if (overlap.length > 0) windowProblems.push(person.name + ': ' + overlap.length + ' duty hours inside window');
 
-    // (b) assigned slot is the least-preferred workable slot.
+    // (b) assigned slot is the most-disliked-by-others workable slot.
+    // dislike(s) = sum over every OTHER person of their rank of slot s.
+    function dislike(s) {
+      var sum = 0;
+      defaultPeople.forEach(function (p) {
+        if (p.name === person.name) return;
+        sum += Scheduler.rankOf(p.shiftOptions, s, 'hours');
+      });
+      return sum;
+    }
+
     var numSlots = config.numSlots;
     var workable = [];
     for (var s = 0; s < numSlots; s++) {
@@ -231,37 +242,27 @@ function main(result) {
     var assignedWorkable = workable.indexOf(entry.slotIndex) >= 0;
     if (!assignedWorkable) windowProblems.push(person.name + ': assigned slot not workable');
 
-    // Preference comparator: greater rank first, then later letter first.
-    function cmp(a, b) {
-      var ra = Scheduler.rankOf(person.shiftOptions, a, 'hours');
-      var rb = Scheduler.rankOf(person.shiftOptions, b, 'hours');
-      if (rb !== ra) return rb - ra;
-      return b - a;
-    }
-    var ideal = workable.slice().sort(cmp)[0];
-    var fullOk = (entry.slotIndex === ideal);
-
-    // Simple sufficient condition for the default data.
-    var assignedRank = Scheduler.rankOf(person.shiftOptions, entry.slotIndex, 'hours');
-    var unranked = assignedRank === (person.shiftOptions || []).length;
-    var laterUnrankedWorkable = workable.filter(function (s) {
-      return s > entry.slotIndex &&
-        Scheduler.rankOf(person.shiftOptions, s, 'hours') === (person.shiftOptions || []).length;
+    var assignedDislike = dislike(entry.slotIndex);
+    var moreDisliked = workable.filter(function (s) { return dislike(s) > assignedDislike; });
+    var laterEqual = workable.filter(function (s) {
+      return s > entry.slotIndex && dislike(s) === assignedDislike;
     });
-    var simpleOk = assignedWorkable && unranked && laterUnrankedWorkable.length === 0;
 
-    if (fullOk) {
-      console.log('      ' + person.name + ': assigned ' + entry.slotLetter +
-        ' is the maximal workable slot (full condition).');
-    } else if (simpleOk) {
-      console.log('      ' + person.name + ': assigned ' + entry.slotLetter +
-        ' passes the simple sufficient condition.');
-    } else {
+    if (moreDisliked.length > 0) {
       windowProblems.push(person.name + ': assigned ' + entry.slotLetter +
-        ' is not least-preferred (ideal=' + Scheduler.SLOT_LETTERS[ideal] + ')');
+        ' has dislike ' + assignedDislike + ' but workable ' +
+        moreDisliked.map(function (s) { return Scheduler.SLOT_LETTERS[s]; }).join(',') +
+        ' are more disliked');
+    } else if (laterEqual.length > 0) {
+      windowProblems.push(person.name + ': assigned ' + entry.slotLetter +
+        ' is beaten in the tie-break by later ' +
+        laterEqual.map(function (s) { return Scheduler.SLOT_LETTERS[s]; }).join(','));
+    } else {
+      console.log('      ' + person.name + ': assigned ' + entry.slotLetter +
+        ' (dislike ' + assignedDislike + ') is the most-disliked workable slot.');
     }
   });
-  assert(windowProblems.length === 0, 'all no-work-window people satisfy Reading A',
+  assert(windowProblems.length === 0, 'all no-work-window people got the most-disliked workable slot',
     windowProblems.join('; '));
 
   // 6. Reproducibility --------------------------------------------------

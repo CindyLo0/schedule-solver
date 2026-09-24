@@ -936,9 +936,11 @@
       out.push({
         h: 'No-work window: ' + p.name,
         text: [p.name + ' may never work between ' + S.DAYS[w.startDay] + ' ' + fmtHour(w.startHour) +
-          ' and ' + S.DAYS[w.endDay] + ' ' + fmtHour(w.endHour) + '. The assigned slot (' +
-          a.slotLetter + ' starting ' + fmtHour(a.slotStart) + ') together with rest days (' +
-          a.restDayNames.join('\u2013') + ') keeps every working hour outside that window.']
+          ' and ' + S.DAYS[w.endDay] + ' ' + fmtHour(w.endHour) + '. ' +
+          p.name + ' is on slot ' + a.slotLetter + ' (starting ' + fmtHour(a.slotStart) +
+          ') because that is the workable shift the rest of the team least wants. ' +
+          'The rest days (' + a.restDayNames.join('\u2013') +
+          ') still keep every working hour outside that window.']
       });
     });
 

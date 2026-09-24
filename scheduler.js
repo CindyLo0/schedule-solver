@@ -545,9 +545,11 @@
   // either "no feasible schedule" or the collected top-scoring assignments.
   //
   // Slot selection:
-  //   - anyone with a no-work window is given their least-preferred WORKABLE
-  //     slot (Reading A): least-preferred first, first arrangement that yields
-  //     any feasible schedule wins;
+  //   - anyone with a no-work window is given the WORKABLE slot the REST of
+  //     the team least wants (highest sum of the other people's rankOf, i.e.
+  //     most disliked by everyone else), most-disliked first, later letter
+  //     first as a tie-break; the first arrangement that yields any feasible
+  //     schedule wins;
   //   - anyone owed a slot guarantee (rotation fairness) is pinned there;
   //   - everyone else is permuted over the remaining slots.
   // Rest selection is then an exact per-assignment search (restAssign).
@@ -564,16 +566,22 @@
       else if (owed && owed[i0] && owed[i0].slot != null) fixedBase[i0] = owed[i0].slot;
     }
 
-    // Least-preferred-first list of workable slots for a window person.
+    // Most-disliked-by-others-first list of workable slots for a window
+    // person. dislike(s) is the sum of every OTHER person's rank of slot s
+    // (higher = the rest of the team wants it less).
     function windowCandidates(idx) {
       var person = people[idx], arr = [];
       for (var s = 0; s < cfg.numSlots; s++) {
         if (slotWindowAllowed(person, slots[s], cfg)) arr.push(s);
       }
       arr.sort(function (a, b) {
-        var ra = rankOf(person.shiftOptions, a, 'hours');
-        var rb = rankOf(person.shiftOptions, b, 'hours');
-        if (rb !== ra) return rb - ra;  // higher rank = less wanted, tried first
+        var da = 0, db = 0;
+        for (var p = 0; p < n; p++) {
+          if (p === idx) continue;
+          da += rankOf(people[p].shiftOptions, a, 'hours');
+          db += rankOf(people[p].shiftOptions, b, 'hours');
+        }
+        if (db !== da) return db - da;  // higher dislike = less wanted by others, tried first
         return b - a;                    // tie-break: later letter first
       });
       return arr;
@@ -934,8 +942,9 @@
   //
   // Untracked dimensions are recorded as hits and never increment a streak, so
   // they can never create rotation debt. Window people are exempt from SLOT
-  // debt (their §4 least-preferred-slot rule is already their fairness
-  // mechanism); their REST dimension participates normally.
+  // debt (their §4 rule already assigns the slot the rest of the team least
+  // wants, which is their fairness mechanism); their REST dimension
+  // participates normally.
 
   var HISTORY_VERSION = 1;
   var MAX_HISTORY_RUNS = 50;
@@ -1008,8 +1017,9 @@
       var e = lastByName[name];
 
       if (p.noWorkWindow) {
-        // §4 already gives window people their least-preferred feasible slot
-        // every run; never owe them a slot and never track their slot streak.
+        // §4 already gives window people the workable slot the rest of the
+        // team least wants every run; never owe them a slot and never track
+        // their slot streak.
         slotStreak = 0;
       } else {
         var slotFirst = (p.shiftOptions || [])[0];
