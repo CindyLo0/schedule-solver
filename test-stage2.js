@@ -318,6 +318,74 @@ cases.forEach(function (c) {
     '  brute=' + (dumb.ok ? dumb.score : dumb.error) + '   [' + ms + ' ms]');
 });
 
+// =====================================================================
+console.log('\n4. Cross-run rotation: window slot outranks guarantees');
+// =====================================================================
+// Simulate the app's run sequence: empty history -> solve -> buildRunRecord
+// -> appendHistory -> computeOwed -> solve(with owed) -> ... The
+// no-work-window person's rule-determined slot (the most-disliked workable
+// slot, H) must be identical every run. A rotation guarantee that cannot
+// coexist with that slot must be DROPPED (with attribution), never the slot.
+// The pin is recomputed from the current rankings each run, so history can
+// never move it.
+
+function findPerson(res, name) {
+  return res.assignment.filter(function (a) { return a.name === name; })[0];
+}
+
+function runSequence(people, cfg, runs) {
+  var history = null;
+  var out = [];
+  for (var r = 0; r < runs; r++) {
+    var owedInfo = S.computeOwed(history, people);
+    var res = S.solve(people, cfg, { owed: owedInfo.owed });
+    out.push({ result: res, owedInfo: owedInfo });
+    if (!res.ok) return out;
+    history = S.appendHistory(history, S.buildRunRecord(res.assignment, people));
+  }
+  return out;
+}
+
+var seq = runSequence(S.defaultPeople, config, 3);
+var daphPerson = S.defaultPeople.filter(function (p) { return p.name === 'Daphine'; })[0];
+
+seq.forEach(function (step, i) {
+  var res = step.result, n = i + 1;
+  check('run ' + n + ' succeeds', res.ok === true);
+  if (!res.ok) return;
+  var d = findPerson(res, 'Daphine');
+  check('run ' + n + ': Daphine gets slot H', d && d.slotLetter === 'H');
+  check('run ' + n + ': Daphine starts at 21:00', d && d.slotStart === 21);
+  check('run ' + n + ': Daphine never on duty inside her window',
+    d && S.satisfiesNoWorkWindow(daphPerson, d.slotStart, d.restDays, config) === true);
+  if (i > 0) {
+    var g = res.guarantees;
+    check('run ' + n + ': guarantee report present', !!g);
+    if (g) {
+      check('run ' + n + ': satisfied + dropped === owed (' +
+        g.satisfied.length + '+' + g.dropped.length + '=' + g.owed.length + ')',
+        g.satisfied.length + g.dropped.length === g.owed.length);
+      var attributed = g.dropped.every(function (x) {
+        return typeof x.name === 'string' && typeof x.dimension === 'string' &&
+          x.value != null && typeof x.reason === 'string' && x.reason.length > 0;
+      });
+      check('run ' + n + ': every dropped guarantee is attributed', attributed);
+      check('run ' + n + ': a guarantee pin is never placed on the window person',
+        g.owed.every(function (x) {
+          return !(x.name === 'Daphine' && x.dimension === 'slot');
+        }));
+    }
+  }
+});
+
+check('run 2 drops at least one guarantee to keep Daphine on H',
+  seq[1].result.guarantees && seq[1].result.guarantees.dropped.length >= 1);
+check('an identical fresh run still puts Daphine on H (history cannot move it)',
+  (function () {
+    var fresh = S.solve(S.defaultPeople, config, { owed: S.computeOwed(null, S.defaultPeople).owed });
+    return findPerson(fresh, 'Daphine').slotLetter === 'H';
+  })());
+
 console.log('\n----------------------------------------');
 console.log(passed + ' passed, ' + failed + ' failed');
 process.exit(failed === 0 ? 0 : 1);

@@ -541,6 +541,59 @@
     return { cost: bestCost, pairs: bestPairs };
   }
 
+  // Most-disliked-by-others-first list of workable slots for a window person.
+  // dislike(s) is the sum of every OTHER person's rank of slot s (higher = the
+  // rest of the team wants it less). Tie-break: later letter first.
+  function windowCandidatesFor(people, idx, slots, cfg) {
+    var person = people[idx], arr = [];
+    var n = people.length;
+    for (var s = 0; s < cfg.numSlots; s++) {
+      if (slotWindowAllowed(person, slots[s], cfg)) arr.push(s);
+    }
+    arr.sort(function (a, b) {
+      var da = 0, db = 0;
+      for (var p = 0; p < n; p++) {
+        if (p === idx) continue;
+        da += rankOf(people[p].shiftOptions, a, 'hours');
+        db += rankOf(people[p].shiftOptions, b, 'hours');
+      }
+      if (db !== da) return db - da;  // higher dislike = less wanted by others, tried first
+      return b - a;                    // tie-break: later letter first
+    });
+    return arr;
+  }
+
+  // Ordered window-pin combinations: each window person on a workable slot,
+  // every person's candidates most-disliked-first, combined depth-first so the
+  // very first combination puts every window person on the single workable
+  // slot the rest of the team least wants. Two window people never share a
+  // slot. Yields objects { person index -> slot }. A window person with no
+  // workable slot terminates the sequence (infeasible).
+  function* windowPinCombos(people, cfg, slots) {
+    var idxs = [];
+    for (var i = 0; i < people.length; i++) if (people[i].noWorkWindow) idxs.push(i);
+    var cands = idxs.map(function (i) { return windowCandidatesFor(people, i, slots, cfg); });
+    for (var k = 0; k < idxs.length; k++) if (cands[k].length === 0) return;
+
+    function* rec(w, chosen, used) {
+      if (w === idxs.length) {
+        var pin = {};
+        for (var c = 0; c < idxs.length; c++) pin[idxs[c]] = chosen[c];
+        yield pin;
+        return;
+      }
+      var list = cands[w];
+      for (var ci = 0; ci < list.length; ci++) {
+        var s = list[ci];
+        if (used[s]) continue;
+        used[s] = true; chosen.push(s);
+        yield* rec(w + 1, chosen, used);
+        chosen.pop(); used[s] = false;
+      }
+    }
+    yield* rec(0, [], {});
+  }
+
   // One full search pass, as a generator so it can be time-sliced. Returns
   // either "no feasible schedule" or the collected top-scoring assignments.
   //
@@ -548,12 +601,15 @@
   //   - anyone with a no-work window is given the WORKABLE slot the REST of
   //     the team least wants (highest sum of the other people's rankOf, i.e.
   //     most disliked by everyone else), most-disliked first, later letter
-  //     first as a tie-break; the first arrangement that yields any feasible
-  //     schedule wins;
+  //     first as a tie-break. A supplied `windowPin` (person index -> slot)
+  //     pins that choice as a hard assignment: it OUTRANKS the rotation
+  //     guarantees, so a guarantee that cannot coexist with it is dropped
+  //     rather than the window slot moving. Without a pin, the window person's
+  //     candidates are enumerated most-disliked-first (first feasible wins);
   //   - anyone owed a slot guarantee (rotation fairness) is pinned there;
   //   - everyone else is permuted over the remaining slots.
   // Rest selection is then an exact per-assignment search (restAssign).
-  function* attemptGen(people, cfg, pw, sw, owed, prog) {
+  function* attemptGen(people, cfg, pw, sw, owed, prog, windowPin) {
     var counters = prog;
     var slots = computeSlots(cfg, 0);
     var n = people.length;
@@ -566,27 +622,20 @@
       else if (owed && owed[i0] && owed[i0].slot != null) fixedBase[i0] = owed[i0].slot;
     }
 
-    // Most-disliked-by-others-first list of workable slots for a window
-    // person. dislike(s) is the sum of every OTHER person's rank of slot s
-    // (higher = the rest of the team wants it less).
-    function windowCandidates(idx) {
-      var person = people[idx], arr = [];
-      for (var s = 0; s < cfg.numSlots; s++) {
-        if (slotWindowAllowed(person, slots[s], cfg)) arr.push(s);
+    // A rule-determined window slot is a hard pin. It is written last, so it
+    // takes precedence over any rotation guarantee on the same person (window
+    // people never carry a slot guarantee anyway) and over guarantee pins that
+    // would collide with it (the clashing guarantee is dropped by the caller).
+    if (windowPin) {
+      for (var wp = 0; wp < windowIdx.length; wp++) {
+        var wpi = windowIdx[wp];
+        if (windowPin[wpi] != null) fixedBase[wpi] = windowPin[wpi];
       }
-      arr.sort(function (a, b) {
-        var da = 0, db = 0;
-        for (var p = 0; p < n; p++) {
-          if (p === idx) continue;
-          da += rankOf(people[p].shiftOptions, a, 'hours');
-          db += rankOf(people[p].shiftOptions, b, 'hours');
-        }
-        if (db !== da) return db - da;  // higher dislike = less wanted by others, tried first
-        return b - a;                    // tie-break: later letter first
-      });
-      return arr;
     }
-    var winCands = windowIdx.map(windowCandidates);
+
+    var winCands = windowIdx.map(function (idx) {
+      return windowCandidatesFor(people, idx, slots, cfg);
+    });
     for (var w0 = 0; w0 < winCands.length; w0++) {
       if (winCands[w0].length === 0) return { best: Infinity, counters: counters };
     }
@@ -677,32 +726,43 @@
       return localFeasible;
     }
 
-    // Enumerate window-slot combinations least-preferred-first; the first that
-    // yields a feasible schedule is the one the window rule selects.
-    var stopped = false;
-    function* winCombo(wi, chosen) {
-      if (stopped) return;
-      if (wi === windowIdx.length) {
-        var fixed = {};
-        for (var kk in fixedBase) fixed[kk] = fixedBase[kk];
-        for (var c = 0; c < windowIdx.length; c++) fixed[windowIdx[c]] = chosen[c];
-        var feasible = yield* searchFixed(fixed);
-        if (feasible) stopped = true;
-        return;
-      }
-      var cands = winCands[wi];
-      for (var ci = 0; ci < cands.length; ci++) {
-        if (stopped) return;
-        var slot = cands[ci];
-        var taken = false;
-        for (var kk2 in fixedBase) if (fixedBase[kk2] === slot) taken = true;
-        if (taken) continue;
-        chosen.push(slot);
-        yield* winCombo(wi + 1, chosen);
-        chosen.pop();
-      }
+    // If some window people are already pinned (supplied `windowPin`), only
+    // the remaining ones are enumerated; otherwise every window person is
+    // enumerated. Least-preferred-first; the first combination that yields a
+    // feasible schedule is the one the window rule selects.
+    var enumWin = [];
+    for (var ew = 0; ew < windowIdx.length; ew++) {
+      if (fixedBase[windowIdx[ew]] == null) enumWin.push(ew);
     }
-    yield* winCombo(0, []);
+
+    var stopped = false;
+    if (enumWin.length === 0) {
+      yield* searchFixed(fixedBase);
+    } else {
+      function* winCombo(wi, chosen) {
+        if (stopped) return;
+        if (wi === enumWin.length) {
+          var fixed = {};
+          for (var kk in fixedBase) fixed[kk] = fixedBase[kk];
+          for (var c = 0; c < enumWin.length; c++) fixed[windowIdx[enumWin[c]]] = chosen[c];
+          var feasible = yield* searchFixed(fixed);
+          if (feasible) stopped = true;
+          return;
+        }
+        var cands = winCands[enumWin[wi]];
+        for (var ci = 0; ci < cands.length; ci++) {
+          if (stopped) return;
+          var slot = cands[ci];
+          var taken = false;
+          for (var kk2 in fixedBase) if (fixedBase[kk2] === slot) taken = true;
+          if (taken) continue;
+          chosen.push(slot);
+          yield* winCombo(wi + 1, chosen);
+          chosen.pop();
+        }
+      }
+      yield* winCombo(0, []);
+    }
 
     if (ties.size === 0) return { best: Infinity, counters: counters };
     return {
@@ -751,21 +811,32 @@
       ? opts.yieldEvery : YIELD_EVERY;
     var owed = opts.owed || null;
 
-    // Rotation guarantees (§5). When any are owed we first try to honour all
-    // of them; if that is infeasible we fall back to the largest feasible
-    // subset (see solveWithFallback). `owed` absent/null => the old path,
-    // unchanged.
+    // Rotation guarantees (§5) are subordinate to the no-work-window rule.
+    // The window people's slots are rule-determined from the CURRENT rankings
+    // and pinned hard (see windowPinCombos). Under each pin we run the
+    // guarantee subset search: it keeps the largest feasible set of guarantees
+    // subject to that pin (see solveWithFallback), so a guarantee that cannot
+    // coexist with the window slot is DROPPED, never the window slot. Only if a
+    // pin is infeasible even with zero guarantees do we advance to the
+    // next-most-disliked workable slot — this keeps the tool solvable.
     var guarantees = buildGuarantees(people, owed);
     var fallback = null;
-    var result;
-    if (guarantees.length > 0) {
-      fallback = yield* solveWithFallback(people, cfg, pw, sw, owed, guarantees, prog);
-      result = fallback.attempt;
-    } else {
-      result = yield* attemptGen(people, cfg, pw, sw, owed, prog);
+    var result = null;
+    var slots0 = computeSlots(cfg, 0);
+    var pins = windowPinCombos(people, cfg, slots0);
+    var pinStep = pins.next();
+    while (!pinStep.done) {
+      var windowPin = pinStep.value;
+      var fb = yield* solveWithFallback(people, cfg, pw, sw, owed, guarantees, prog, windowPin);
+      if (fb.attempt && fb.attempt.best !== Infinity) {
+        fallback = fb;
+        result = fb.attempt;
+        break;
+      }
+      pinStep = pins.next();
     }
 
-    if (result.best === Infinity) return { ok: false, error: 'infeasible', elapsedMs: Date.now() - t0 };
+    if (!result) return { ok: false, error: 'infeasible', elapsedMs: Date.now() - t0 };
 
     // Attribute every owed guarantee as satisfied or dropped. Only produced
     // when the caller actually supplied `opts.owed`, so a run without rotation
@@ -1146,19 +1217,19 @@
 
   // Given all owed guarantees, find the feasible run that keeps the most of
   // them (exact subset search for <= SUBSET_ENUM_MAX guarantees, otherwise a
-  // bounded greedy drop). The windows and the open domain are untouched; only
-  // which guarantees are pinned changes.
+  // bounded greedy drop), SUBJECT TO the supplied window pin. The window pin
+  // is hard: only which guarantees are pinned changes.
   //
   // Returns { attempt, mask, attempts } where `attempt` is an attemptGen
   // result and `mask` marks the kept guarantees (-1 when nothing was feasible,
   // including the no-guarantee base problem).
-  function* solveWithFallback(people, cfg, pw, sw, owed, guarantees, prog) {
+  function* solveWithFallback(people, cfg, pw, sw, owed, guarantees, prog, windowPin) {
     var G = guarantees.length;
     var attempts = 0;
 
     function* runMask(mask) {
-      var subset = owedForMask(owed, guarantees, mask);
-      return yield* attemptGen(people, cfg, pw, sw, subset, prog);
+      var subset = owed ? owedForMask(owed, guarantees, mask) : null;
+      return yield* attemptGen(people, cfg, pw, sw, subset, prog, windowPin);
     }
 
     if (G <= SUBSET_ENUM_MAX) {
