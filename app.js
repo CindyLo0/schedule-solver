@@ -1,11 +1,15 @@
 /* app.js
  *
- * Interface for the Shift Coverage Solver: explanation, fixed constraints and
- * editable per-person preference cards.
+ * Interface for the Shift Coverage Solver: explanation, fixed constraints,
+ * editable per-person preference weights, and the cross-run fairness view.
  *
  * State is a plain array of people in the same shape scheduler.js expects:
  *   { name, shiftWeights, restWeights, priority, noWorkWindow }
  * Each weight is 0..100; higher means more wanted.
+ *
+ * Fairness is scored in POINTS and SATISFACTION. The
+ * engine flattens both weight lists of anyone with a no-work window, so this
+ * screen shows those people their equal (flat) values and locks the boxes.
  */
 
 (function () {
@@ -13,6 +17,8 @@
 
   var S = window.Scheduler;
   var config = S.config;
+  var NUM_SLOTS = config.numSlots;
+  var NUM_PAIRS = S.ADJACENT_PAIRS.length;
 
   // ------------------------------------------------------------------
   // State (pre-loaded with the default dataset)
@@ -39,33 +45,50 @@
   var views = []; // per-person DOM references
 
   // ------------------------------------------------------------------
-  // Cross-run fairness history (persisted in this browser)
+  // Cross-run fairness history (persisted in this browser, version 2)
   // ------------------------------------------------------------------
+  //
+  // Shape: {
+  //   version: 2,
+  //   runs:      [ { at, entries:[ { name, points, slotPoints, restPoints,
+  //                                  priorityPoints, softPoints, ideal, windowed } ] } ],
+  //   fingerprints: { "<name>": "<string>" },
+  //   breaker:      { "<name>": { worstStreak: <n> } }
+  // }
+  //
+  // The v1 key is deliberately ignored, so old data can never be read here.
 
-  var HISTORY_KEY = 'shift-solver-history-v1';
+  var HISTORY_KEY = 'shift-solver-history-v2';
   var storageWorking = true;
   var history = loadHistory();
 
   function emptyHistory() {
-    return { version: S.HISTORY_VERSION, runs: [], streaks: {} };
+    return {
+      version: S.HISTORY_VERSION,
+      runs: [],
+      fingerprints: {},
+      breaker: {}
+    };
   }
 
   // Read the saved history, tolerating missing or corrupt data. Never throws:
-  // if storage is unavailable we just carry on with an empty history.
+  // anything missing, unreadable, or from an older version becomes an empty
+  // version-2 history.
   function loadHistory() {
     try {
       var raw = window.localStorage.getItem(HISTORY_KEY);
       if (!raw) return emptyHistory();
       var parsed = JSON.parse(raw);
-      if (!parsed || typeof parsed !== 'object' ||
-          !Array.isArray(parsed.runs) ||
-          !parsed.streaks || typeof parsed.streaks !== 'object') {
-        return emptyHistory();
-      }
+      if (!parsed || typeof parsed !== 'object') return emptyHistory();
+      if (parsed.version !== S.HISTORY_VERSION) return emptyHistory();
+      if (!Array.isArray(parsed.runs)) return emptyHistory();
       return {
         version: S.HISTORY_VERSION,
         runs: parsed.runs,
-        streaks: parsed.streaks
+        fingerprints: (parsed.fingerprints && typeof parsed.fingerprints === 'object')
+          ? parsed.fingerprints : {},
+        breaker: (parsed.breaker && typeof parsed.breaker === 'object')
+          ? parsed.breaker : {}
       };
     } catch (err) {
       storageWorking = false;
@@ -104,6 +127,22 @@
     return node;
   }
 
+  function sum(arr) {
+    var t = 0;
+    for (var i = 0; i < arr.length; i++) t += arr[i];
+    return t;
+  }
+
+  function round1(n) { return Math.round(n * 10) / 10; }
+
+  // A weight can be an integer typed by the person, or an engine-computed
+  // equal value for a no-work-window person (e.g. 100 / 8). Show it short.
+  function fmtWeight(v) {
+    var n = Number(v);
+    if (!isFinite(n)) return '0';
+    return String(Math.round(n * 10000) / 10000);
+  }
+
   // The grid is fixed: the eight slots always start at 00:00, 03:00, ... 21:00.
   function currentSlots() {
     return S.computeSlots(config, 0);
@@ -115,6 +154,51 @@
 
   function swapClass(node, name, on) {
     if (on) node.classList.add(name); else node.classList.remove(name);
+  }
+
+  // The two weight lists the ENGINE will actually use for this person. For
+  // anyone with a no-work window both lists are flattened to equal values
+  // (each slot = 100/numSlots, each pair = 100/numPairs); the engine enforces
+  // this, and the screen mirrors it. Everyone else keeps their own numbers.
+  function effectiveWeightArrays(p) {
+    if (typeof S.effectiveWeights === 'function') {
+      try {
+        var e = S.effectiveWeights(p);
+        if (e && e.shiftWeights && e.restWeights) return e;
+        if (Array.isArray(e) && e.length === 2 &&
+            Array.isArray(e[0]) && Array.isArray(e[1])) {
+          return { shiftWeights: e[0], restWeights: e[1] };
+        }
+      } catch (err) { /* fall through to the local copy */ }
+    }
+    if (p.noWorkWindow) {
+      var shift = [], rest = [];
+      for (var i = 0; i < NUM_SLOTS; i++) shift.push(100 / NUM_SLOTS);
+      for (var j = 0; j < NUM_PAIRS; j++) rest.push(100 / NUM_PAIRS);
+      return { shiftWeights: shift, restWeights: rest };
+    }
+    return { shiftWeights: p.shiftWeights, restWeights: p.restWeights };
+  }
+
+  // Normalise a satisfaction value to a 0..100 percentage number. The engine
+  // may report it as a ratio (0..1) or already as a percentage.
+  function satisfactionValue(entry) {
+    if (!entry) return null;
+    if (typeof entry.satisfaction === 'number' && isFinite(entry.satisfaction)) {
+      var s = entry.satisfaction;
+      if (s >= 0 && s <= 1.0000001) s *= 100;
+      return s;
+    }
+    if (typeof entry.ideal === 'number' && entry.ideal > 0 &&
+        typeof entry.points === 'number') {
+      return 100 * entry.points / entry.ideal;
+    }
+    return null;
+  }
+
+  function fmtSatisfaction(entry) {
+    var v = satisfactionValue(entry);
+    return v === null ? '\u2014' : round1(v) + '%';
   }
 
   // ------------------------------------------------------------------
@@ -174,7 +258,7 @@
     nameInput.setAttribute('aria-label', 'Name');
     nameInput.addEventListener('input', function () {
       state[index].name = nameInput.value;
-      refreshOwed();
+      refreshFairness();
     });
     head.appendChild(nameInput);
 
@@ -183,17 +267,31 @@
     var group = el('div', 'toggle-group');
     var restBtn = el('button', null, 'Rest days');
     restBtn.type = 'button';
-    restBtn.title = 'This person\u2019s rest-day list is a requirement.';
-    restBtn.addEventListener('click', function () { state[index].priority = 'rest'; updatePerson(view); });
+    restBtn.title = 'This person cares most about their rest-day pairs.';
+    restBtn.addEventListener('click', function () {
+      state[index].priority = 'rest';
+      updatePerson(view);
+      refreshStanding();
+    });
     var hoursBtn = el('button', null, 'Work hours');
     hoursBtn.type = 'button';
-    hoursBtn.title = 'This person\u2019s shift-slot list is a requirement.';
-    hoursBtn.addEventListener('click', function () { state[index].priority = 'hours'; updatePerson(view); });
+    hoursBtn.title = 'This person cares most about their shift start times.';
+    hoursBtn.addEventListener('click', function () {
+      state[index].priority = 'hours';
+      updatePerson(view);
+      refreshStanding();
+    });
     group.appendChild(restBtn);
     group.appendChild(hoursBtn);
     pBlock.appendChild(group);
     head.appendChild(pBlock);
     card.appendChild(head);
+
+    // --- the no-work-window rule note (hidden unless it applies) ---
+    var windowNote = el('p', 'window-note note',
+      'Equal weight by rule (no-work-window people are indifferent; they take the leftover).');
+    windowNote.hidden = true;
+    card.appendChild(windowNote);
 
     // --- rest-day pairs dimension (weight 0..100 each) ---
     var restDim = el('div', 'dimension');
@@ -258,7 +356,6 @@
     adv.appendChild(el('summary', null, 'Advanced (no-work window)'));
     var advBody = el('div', 'adv-body');
 
-    // no-work window
     var winRow = el('div', 'adv-row');
     var winLabel = el('label');
     var winEnabled = document.createElement('input');
@@ -305,6 +402,7 @@
         state[index].noWorkWindow = null;
       }
       updatePerson(view);
+      refreshStanding();
     });
 
     adv.appendChild(advBody);
@@ -318,6 +416,7 @@
     view.hourInputs = hourInputs;
     view.restTotal = restTotal;
     view.hourTotal = hourTotal;
+    view.windowNote = windowNote;
     view.winEnabled = winEnabled;
     view.winFields = winFields;
     view.startDaySel = startDaySel;
@@ -328,12 +427,14 @@
   }
 
   function setWeight(view, kind, index, input) {
+    if (state[view.index].noWorkWindow) return; // inputs are locked, values are equal by rule
     var raw = input.value;
     var v = clampWeight(raw);
     var arr = kind === 'rest' ? state[view.index].restWeights : state[view.index].shiftWeights;
     arr[index] = v;
     if (raw !== '' && String(v) !== raw) input.value = String(v);
     updateTotals(view);
+    refreshStanding();
   }
 
   function snapWeight(input) {
@@ -342,10 +443,9 @@
 
   function updateTotals(view) {
     var p = state[view.index];
-    var restSum = p.restWeights.reduce(function (a, b) { return a + b; }, 0);
-    var hourSum = p.shiftWeights.reduce(function (a, b) { return a + b; }, 0);
-    view.restTotal.textContent = 'Total ' + restSum + ' / 100';
-    view.hourTotal.textContent = 'Total ' + hourSum + ' / 100';
+    var eff = effectiveWeightArrays(p);
+    view.restTotal.textContent = 'Total ' + fmtWeight(sum(eff.restWeights)) + ' / 100';
+    view.hourTotal.textContent = 'Total ' + fmtWeight(sum(eff.shiftWeights)) + ' / 100';
   }
 
   function updatePerson(view) {
@@ -354,28 +454,35 @@
     swapClass(view.restBtn, 'active', p.priority === 'rest');
     swapClass(view.hoursBtn, 'active', p.priority === 'hours');
 
-    for (var i = 0; i < config.numSlots; i++) {
-      view.hourInputs[i].value = String(p.shiftWeights[i]);
+    // A no-work-window person is flattened to equal values by the engine, so
+    // show those equal values and lock the boxes. Turning the window off
+    // restores the person's own numbers, which are still held in state.
+    var windowed = !!p.noWorkWindow;
+    var eff = effectiveWeightArrays(p);
+
+    for (var i = 0; i < NUM_SLOTS; i++) {
+      view.hourInputs[i].value = fmtWeight(eff.shiftWeights[i]);
+      view.hourInputs[i].disabled = windowed;
     }
-    for (var r = 0; r < S.ADJACENT_PAIRS.length; r++) {
-      view.restInputs[r].value = String(p.restWeights[r]);
+    for (var r = 0; r < NUM_PAIRS; r++) {
+      view.restInputs[r].value = fmtWeight(eff.restWeights[r]);
+      view.restInputs[r].disabled = windowed;
     }
     updateTotals(view);
+    view.windowNote.hidden = !windowed;
 
-    view.winEnabled.checked = !!p.noWorkWindow;
-    view.winFields.style.display = p.noWorkWindow ? 'flex' : 'none';
-    view.startDaySel.disabled = !p.noWorkWindow;
-    view.startHourSel.disabled = !p.noWorkWindow;
-    view.endDaySel.disabled = !p.noWorkWindow;
-    view.endHourSel.disabled = !p.noWorkWindow;
-    if (p.noWorkWindow) {
+    view.winEnabled.checked = windowed;
+    view.winFields.style.display = windowed ? 'flex' : 'none';
+    view.startDaySel.disabled = !windowed;
+    view.startHourSel.disabled = !windowed;
+    view.endDaySel.disabled = !windowed;
+    view.endHourSel.disabled = !windowed;
+    if (windowed) {
       view.startDaySel.value = String(p.noWorkWindow.startDay);
       view.startHourSel.value = String(p.noWorkWindow.startHour);
       view.endDaySel.value = String(p.noWorkWindow.endDay);
       view.endHourSel.value = String(p.noWorkWindow.endHour);
     }
-
-    refreshOwed();
   }
 
   function updateAll() {
@@ -395,79 +502,139 @@
   }
 
   // ------------------------------------------------------------------
-  // Fairness (rotation): guaranteed list, ledger, recent runs, history
+  // Fairness (standing, ledger, recent runs) — points and satisfaction
   // ------------------------------------------------------------------
 
-  // Plain-English guarantee sentences, built entirely from the data.
-  function guaranteeSentences(people) {
-    var owedInfo = S.computeOwed(history, people);
-    var lines = [];
-    for (var i = 0; i < people.length; i++) {
-      var p = people[i];
-      var o = owedInfo.owed[i];
-      if (!o) continue;
-      if (o.slot != null) {
-        lines.push({
-          text: p.name + ' is guaranteed their top-pick shift slot (' + S.SLOT_LETTERS[o.slot] +
-            ') this run \u2014 ' + missPhrase(o.slotStreak, 'slot'),
-          kind: 'slot'
-        });
-      }
-      if (o.pair != null) {
-        lines.push({
-          text: p.name + ' is guaranteed their top-pick rest-day pair (' + pairLabel(o.pair) +
-            ') this run \u2014 ' + missPhrase(o.pairStreak, 'rest'),
-          kind: 'rest'
-        });
-      }
+  function currentFairness(people) {
+    if (typeof S.computeFairness !== 'function') return null;
+    try {
+      return S.computeFairness(history, people) || null;
+    } catch (err) {
+      return null;
     }
-    return lines;
   }
 
-  function missPhrase(streak, dimension) {
-    if (!streak || streak <= 1) return 'they missed it last time.';
-    return 'they have missed it ' + streak + ' ' + dimension + ' runs in a row.';
+  function fairnessEntries(f) {
+    if (f && Array.isArray(f.entries)) return f.entries;
+    return [];
   }
 
-  function refreshOwed() {
-    var box = document.getElementById('owed-box');
+  function fairnessByName(f, name) {
+    var list = fairnessEntries(f);
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].name === name) return list[i];
+    }
+    return null;
+  }
+
+  function breakerStreak(name) {
+    var b = (history && history.breaker) || {};
+    var rec = b[name];
+    return (rec && typeof rec.worstStreak === 'number') ? rec.worstStreak : 0;
+  }
+
+  function entryPendingBreaker(entry) {
+    return !!(entry && (entry.breakerPending || entry.pendingBreaker ||
+      entry.breakerArmed || entry.breakered));
+  }
+
+  // Show who is behind, by satisfaction, with their running points, and flag
+  // any pending breaker.
+  function refreshStanding() {
+    var box = document.getElementById('standing-box');
     if (!box) return;
     box.innerHTML = '';
-    var lines = guaranteeSentences(state);
 
-    if (!lines.length) {
+    var f = currentFairness(state);
+    var entries = fairnessEntries(f);
+    if (!entries.length) {
       box.appendChild(el('p', 'note',
-        'No guarantees this round: no previous run, or everyone got their first choices last time.'));
+        'No runs recorded yet. Everyone starts level \u2014 the first run is a plain best-points search.'));
       return;
     }
 
-    var list = el('ul', 'owed-list');
-    lines.forEach(function (line) {
-      var li = el('li', 'owed-item');
-      li.appendChild(el('span', 'owed-mark', 'Guaranteed:'));
-      li.appendChild(el('span', null, line.text));
+    var nums = [];
+    entries.forEach(function (e) {
+      var v = satisfactionValue(e);
+      if (v !== null) nums.push(v);
+    });
+    var minVal = nums.length ? Math.min.apply(null, nums) : null;
+    var maxVal = nums.length ? Math.max.apply(null, nums) : null;
+    var spread = (minVal !== null && maxVal !== null) ? (maxVal - minVal) : 0;
+
+    var list = el('ul', 'standing-list');
+    entries.slice().sort(function (a, b) {
+      var av = satisfactionValue(a), bv = satisfactionValue(b);
+      if (av === null) av = Infinity;
+      if (bv === null) bv = Infinity;
+      return av - bv;
+    }).forEach(function (e) {
+      var li = el('li', 'standing-item');
+      var sat = satisfactionValue(e);
+      var streak = breakerStreak(e.name);
+      var pending = entryPendingBreaker(e) || streak > 0;
+
+      var main = el('div', 'standing-main');
+      main.appendChild(el('span', 'standing-name', e.name));
+      main.appendChild(el('span', 'standing-sat', 'satisfaction ' + fmtSatisfaction(e)));
+      var points = (typeof e.lifetimePoints === 'number') ? e.lifetimePoints
+        : (typeof e.points === 'number' ? e.points : 0);
+      var rounds = (typeof e.rounds === 'number')
+        ? ' over ' + e.rounds + ' run' + (e.rounds === 1 ? '' : 's') : '';
+      main.appendChild(el('span', 'standing-points', 'running points ' + points + rounds));
+      li.appendChild(main);
+
+      var marks = el('div', 'standing-marks');
+      if (spread > 0.05 && sat !== null && Math.abs(sat - minVal) < 0.05) {
+        marks.appendChild(el('span', 'standing-mark', 'near the bottom'));
+      }
+      if (pending) {
+        marks.appendChild(el('span', 'standing-mark breaker',
+          'pending breaker' + (streak > 0 ? ' (shortfall streak ' + streak + ')' : '')));
+      }
+      if (e.windowed) {
+        marks.appendChild(el('span', 'standing-note',
+          'has a no-work window \u2014 slot is chosen by rule'));
+      }
+      if (marks.childNodes.length) li.appendChild(marks);
+
       list.appendChild(li);
     });
     box.appendChild(list);
+  }
+
+  function latestRunPoints(name) {
+    var runs = (history && history.runs) || [];
+    if (!runs.length) return null;
+    var last = runs[runs.length - 1];
+    var entries = (last && last.entries) || [];
+    for (var i = 0; i < entries.length; i++) {
+      if (entries[i].name === name) {
+        return typeof entries[i].points === 'number' ? entries[i].points : null;
+      }
+    }
+    return null;
   }
 
   function refreshLedger() {
     var tbody = document.querySelector('#ledger-table tbody');
     if (!tbody) return;
     tbody.innerHTML = '';
-    var streaks = (history && history.streaks) || {};
 
+    var f = currentFairness(state);
     state.forEach(function (p) {
-      var st = streaks[p.name] || { slot: 0, rest: 0 };
-      var exempt = !!p.noWorkWindow;
-      var slotMisses = exempt ? 0 : (st.slot || 0);
-      var restMisses = st.rest || 0;
+      var e = fairnessByName(f, p.name);
+      var cumulative = e
+        ? ((typeof e.lifetimePoints === 'number') ? e.lifetimePoints
+          : (typeof e.points === 'number' ? e.points : 0))
+        : 0;
+      var latest = latestRunPoints(p.name);
 
       var tr = document.createElement('tr');
       tr.appendChild(el('td', null, p.name));
-      tr.appendChild(el('td', null, String(slotMisses)));
-      tr.appendChild(el('td', null, String(restMisses)));
-      tr.appendChild(el('td', 'note', exempt ? 'Exempt (has a no-work window)' : 'Tracked'));
+      tr.appendChild(el('td', null, e ? fmtSatisfaction(e) : '\u2014'));
+      tr.appendChild(el('td', 'points', String(cumulative)));
+      tr.appendChild(el('td', 'points', latest === null ? '\u2014' : String(latest)));
       tbody.appendChild(tr);
     });
   }
@@ -476,8 +643,8 @@
     var box = document.getElementById('recent-runs');
     if (!box) return;
     box.innerHTML = '';
-    var runs = (history && history.runs) || [];
 
+    var runs = (history && history.runs) || [];
     if (!runs.length) {
       box.appendChild(el('div', 'recent-none', 'No runs recorded yet in this browser.'));
       return;
@@ -486,10 +653,14 @@
     var wrap = el('div', 'recent-runs');
     runs.slice().reverse().slice(0, 5).forEach(function (run) {
       var entries = (run && run.entries) || [];
-      var slotTracked = entries.filter(function (e) { return e.slotTracked !== false; });
-      var restTracked = entries.filter(function (e) { return e.restTracked !== false; });
-      var slotHits = slotTracked.filter(function (e) { return e.slotHit; }).length;
-      var restHits = restTracked.filter(function (e) { return e.restHit; }).length;
+      var total = 0;
+      var worst = null;
+      var worstPts = Infinity;
+      entries.forEach(function (e) {
+        var pts = (typeof e.points === 'number') ? e.points : 0;
+        total += pts;
+        if (pts < worstPts) { worstPts = pts; worst = e.name; }
+      });
 
       var when = 'unknown time';
       try {
@@ -497,18 +668,19 @@
         if (!isNaN(d.getTime())) when = d.toLocaleString();
       } catch (err) { /* keep the placeholder */ }
 
+      var summary = entries.length + ' people, ' + total + ' points awarded';
+      if (worst) summary += '; least to ' + worst + ' (' + worstPts + ' points)';
+
       var row = el('div', 'recent-run');
       row.appendChild(el('span', 'recent-when', when + ': '));
-      row.appendChild(el('span', null,
-        'first slot given to ' + slotHits + ' of ' + slotTracked.length +
-        ' tracked, first rest pair given to ' + restHits + ' of ' + restTracked.length + ' tracked.'));
+      row.appendChild(el('span', null, summary + '.'));
       wrap.appendChild(row);
     });
     box.appendChild(wrap);
   }
 
   function refreshFairness() {
-    refreshOwed();
+    refreshStanding();
     refreshLedger();
     refreshRecentRuns();
   }
@@ -551,7 +723,7 @@
         saveHistory();
         confirmBox.hidden = true;
         refreshFairness();
-        logLine('Rotation history cleared.');
+        logLine('Fairness history cleared.');
       });
     }
   }
@@ -567,6 +739,10 @@
     var log = document.getElementById('log');
     log.textContent += text + '\n';
     log.scrollTop = log.scrollHeight;
+  }
+
+  function statOrZero(stats, key) {
+    return (stats && typeof stats[key] === 'number') ? stats[key] : 0;
   }
 
   function wireRun() {
@@ -589,9 +765,8 @@
       var frozen = state.map(clonePerson); // snapshot so mid-run edits cannot disturb it
       lastRunPeople = frozen;
 
-      var owedInfo = S.computeOwed(history, frozen);
-      logLine('Rotation: ' + owedInfo.list.length + ' guarantee' +
-        (owedInfo.list.length === 1 ? '' : 's') + ' owed going into this run.');
+      logLine('Fairness history: ' + (history.runs || []).length + ' saved run' +
+        ((history.runs || []).length === 1 ? '' : 's') + ' going into this run.');
 
       var seedInput = document.getElementById('tie-seed');
       var seed = parseInt(seedInput.value, 10);
@@ -600,7 +775,7 @@
 
       S.solveAsync(frozen, config, {
         tieSeed: seed,
-        owed: owedInfo.owed,
+        history: history,
         onProgress: function (s) {
           if (!s || typeof s.outerChecked !== 'number' || typeof s.totalOuter !== 'number' ||
               typeof s.innerChecked !== 'number' || typeof s.hasBest !== 'boolean') {
@@ -631,28 +806,37 @@
       }).then(function (result) {
         logLine('Search finished in ' + result.elapsedMs + ' ms (' + snapshots + ' progress updates).');
         if (result.ok) {
-          logLine('Best weight score ' + result.score + '. Coverage ' +
+          logLine('Best points score ' + result.score + '. Coverage ' +
             result.minCoverage + ' to ' + result.maxCoverage + '.');
-          logLine('Checked ' + result.stats.innerPerms + ' slot arrangements and ' +
-            result.stats.innerChecked + ' coverage checks across ' + result.stats.outers +
-            ' outer arrangements.');
+          logLine('Checked ' + statOrZero(result.stats, 'innerPerms') + ' slot arrangements and ' +
+            statOrZero(result.stats, 'innerChecked') + ' coverage checks across ' +
+            statOrZero(result.stats, 'outers') + ' outer arrangements.');
           if (result.tie) {
-            logLine('Top-score schedules: ' + result.tie.count +
+            logLine('Top-points schedules: ' + result.tie.count +
               (result.tie.count > 1
                 ? ' (tied). Tie-break chose entry #' + (result.tie.chosenIndex + 1) +
                   ' using seed ' + result.tie.seed + '.'
                 : ' (no tie).'));
           }
-          if (result.guarantees) {
-            logLine('Guarantees: ' + result.guarantees.owed.length + ' owed; ' +
-              result.guarantees.satisfied.length + ' satisfied, ' +
-              result.guarantees.dropped.length + ' dropped.');
+          if (result.fairness) {
+            logLine('Fairness: awarded ' + result.fairness.achievedTotal + ' of a best-possible ' +
+              result.fairness.maxTotal + ' points' +
+              (typeof result.fairness.bandPercent === 'number'
+                ? ' (band ' + fmtWeight(result.fairness.bandPercent) + '%)' : '') + '.');
+            if (result.fairness.worstName) {
+              logLine('Worst-off this run: ' + result.fairness.worstName +
+                ' (short by ' + result.fairness.worstShortfall + ').');
+            }
+            var fired = (result.fairness.breakerFired || []).length;
+            var dropped = (result.fairness.breakerDropped || []).length;
+            if (fired) logLine('Fairness breaker applied for ' + fired + ' person(s).');
+            if (dropped) logLine('Fairness breaker dropped for ' + dropped + ' person(s).');
           }
           var runRecord = S.buildRunRecord(result.assignment, frozen);
           history = S.appendHistory(history, runRecord);
           saveHistory();
           refreshFairness();
-          logLine('Rotation history saved for the next run (' + history.runs.length +
+          logLine('Fairness history saved for the next run (' + history.runs.length +
             ' run' + (history.runs.length === 1 ? '' : 's') + ' recorded).');
         } else {
           logLine('No schedule produced: ' + result.error + '.');
@@ -697,6 +881,20 @@
     return { bg: bg, fg: extra >= 3 ? '#ffffff' : '#1a1a1a' };
   }
 
+  // Turn a breaker entry's dimension/value into plain words. The value may be
+  // a slot index, a rest-pair array, or a rest-pair index.
+  function breakerWhat(dimension, value) {
+    if (dimension === 'slot') {
+      if (typeof value === 'number' && S.SLOT_LETTERS[value]) return 'slot ' + S.SLOT_LETTERS[value];
+      return 'a shift slot (' + value + ')';
+    }
+    if (Array.isArray(value)) return 'rest days ' + pairLabel(value);
+    if (typeof value === 'number' && S.ADJACENT_PAIRS[value]) {
+      return 'rest days ' + pairLabel(S.ADJACENT_PAIRS[value]);
+    }
+    return 'rest days (' + value + ')';
+  }
+
   function renderResults(result) {
     document.getElementById('results-empty').hidden = true;
     document.getElementById('results').hidden = false;
@@ -704,6 +902,7 @@
     renderSummary(result);
     renderSchedule(result);
     renderHeatmap(result);
+    renderFairnessResult(result);
     renderExplanation(result);
   }
 
@@ -731,13 +930,13 @@
     }).filter(function (g) { return g.length > 1; });
     inter.forEach(function (g) {
       box.appendChild(el('p', null,
-        g.join(' and ') + ' entered identical preferences, so either could have been the one to miss out.'));
+        g.join(' and ') + ' entered identical weights, so either could have been the one to fall short.'));
     });
 
     box.appendChild(el('p', null,
       'Tie-break rule: ' + t.ruleLabel + ', seed ' + t.seed + '. The tied schedules are sorted by who holds ' +
       'which slot (by name), and the draw picked entry #' + (t.chosenIndex + 1) + ' of ' + t.count + '. ' +
-      'The same seed and the same preferences always give the same result; change the seed and press Run again to redraw.'));
+      'The same seed and the same weights always give the same result; change the seed and press Run again to redraw.'));
 
     if (t.swingNames && t.swingNames.length) {
       box.appendChild(el('p', null,
@@ -771,8 +970,21 @@
       tiles.push({ label: 'Hours above minimum', value: String(above) });
       tiles.push({ label: 'Total scheduled hours', value: String(result.totalPersonHours) });
       tiles.push({ label: 'Priority weight points', value: prioritySum + ' / ' + maxPriority });
-      tiles.push({ label: 'Outer arrangements', value: String(result.stats.outers) });
-      tiles.push({ label: 'Coverage checks', value: String(result.stats.innerChecked) });
+      if (result.fairness) {
+        tiles.push({ label: 'Points awarded', value: String(result.fairness.achievedTotal) });
+        tiles.push({ label: 'Best possible points', value: String(result.fairness.maxTotal) });
+        if (typeof result.fairness.bandPercent === 'number') {
+          tiles.push({ label: 'Fairness band', value: fmtWeight(result.fairness.bandPercent) + '%' });
+        }
+        if (result.fairness.worstName) {
+          tiles.push({
+            label: 'Worst-off this run',
+            value: result.fairness.worstName + ' (' + result.fairness.worstShortfall + ' short)'
+          });
+        }
+      }
+      tiles.push({ label: 'Outer arrangements', value: String(statOrZero(result.stats, 'outers')) });
+      tiles.push({ label: 'Coverage checks', value: String(statOrZero(result.stats, 'innerChecked')) });
       tiles.push({ label: 'Solve time', value: result.elapsedMs + ' ms' });
     }
 
@@ -853,6 +1065,52 @@
     });
   }
 
+  // Post-run fairness: totals, the worst-off person, and any breaker that
+  // fired or was dropped, with the engine's own reasons.
+  function renderFairnessResult(result) {
+    var box = document.getElementById('fairness-result');
+    if (!box) return;
+    box.innerHTML = '';
+
+    var f = result.fairness;
+    if (!f) {
+      box.appendChild(el('p', 'note', 'No fairness detail was returned for this run.'));
+      return;
+    }
+
+    box.appendChild(el('p', null,
+      'This schedule awarded ' + f.achievedTotal + ' of a best-possible ' + f.maxTotal + ' points' +
+      (typeof f.bandPercent === 'number'
+        ? ', inside a fairness band of ' + fmtWeight(f.bandPercent) + '% of that best total.' : '.')));
+
+    if (f.achievedTotal < f.maxTotal) {
+      box.appendChild(el('p', null,
+        'Fairness gave up ' + (f.maxTotal - f.achievedTotal) +
+        ' points on purpose within that band, so no single person was left far behind.'));
+    }
+
+    if (f.worstName) {
+      box.appendChild(el('p', null,
+        'Furthest from their own ideal this run: ' + f.worstName +
+        (typeof f.worstShortfall === 'number' ? ' (short by ' + f.worstShortfall + ' points).' : '.')));
+    }
+
+    appendBreakerList(box, 'Fairness breaker applied', f.breakerFired);
+    appendBreakerList(box, 'Fairness breaker not applied', f.breakerDropped);
+  }
+
+  function appendBreakerList(box, heading, list) {
+    if (!list || !list.length) return;
+    box.appendChild(el('h4', 'sub-head', heading));
+    var ul = el('ul', 'breaker-list');
+    list.forEach(function (b) {
+      var text = b.name + ' \u2014 ' + breakerWhat(b.dimension, b.value);
+      text += b.reason ? ': ' + b.reason : '';
+      ul.appendChild(el('li', null, text));
+    });
+    box.appendChild(ul);
+  }
+
   function buildExplanation(result, people) {
     people = people || state;
     var out = [];
@@ -861,8 +1119,8 @@
       var msg;
       if (result.error === 'infeasible') {
         msg = 'The exhaustive search proved that no assignment can keep at least ' +
-          config.minCoverage + ' people on duty in all 168 hours while respecting the ' +
-          'no-work windows and any rotation guarantees. No valid schedule exists for these preferences.';
+          config.minCoverage + ' people on duty in all 168 hours while respecting every ' +
+          'no-work window and every pending fairness rule. No valid schedule exists for these weights.';
       } else if (result.error === 'exact-start-contradiction') {
         msg = 'Two requested exact start hours do not fall on the same ' + config.stagger +
           '-hour grid, so no single set of evenly spaced slots can satisfy both. Change one of the requested hours.';
@@ -889,6 +1147,45 @@
         above + ' hours have more, up to ' + result.maxCoverage + '.']
     });
 
+    // Fairness: totals, band, and the worst-off person, all in points.
+    var f = result.fairness;
+    if (f) {
+      var lines = [];
+      lines.push('The best points total this group could theoretically reach is ' + f.maxTotal +
+        '. This schedule awarded ' + f.achievedTotal + ' points' +
+        (typeof f.bandPercent === 'number'
+          ? ' \u2014 a deliberate choice kept within a ' + fmtWeight(f.bandPercent) +
+            '% band of that best total.' : '.'));
+      if (f.achievedTotal < f.maxTotal) {
+        lines.push('That means ' + (f.maxTotal - f.achievedTotal) +
+          ' points were given up inside the band so the worst-off person would not be left far behind.');
+      }
+      if (f.worstName) {
+        lines.push('The person furthest from their own ideal this run was ' + f.worstName +
+          (typeof f.worstShortfall === 'number' ? ', short by ' + f.worstShortfall + ' points.' : '.'));
+      }
+      out.push({ h: 'Fairness and points', text: lines });
+
+      if (Array.isArray(f.breakerFired) && f.breakerFired.length) {
+        out.push({
+          h: 'Fairness breaker applied',
+          text: f.breakerFired.map(function (b) {
+            return b.name + ' was given ' + breakerWhat(b.dimension, b.value) + ' because ' +
+              (b.reason || 'their fairness breaker fired this run') + '.';
+          })
+        });
+      }
+      if (Array.isArray(f.breakerDropped) && f.breakerDropped.length) {
+        out.push({
+          h: 'Fairness breaker not applied',
+          text: f.breakerDropped.map(function (b) {
+            return 'The fairness breaker for ' + b.name + ' (' + breakerWhat(b.dimension, b.value) +
+              ') could not be applied' + (b.reason ? ': ' + b.reason : '') + '.';
+          })
+        });
+      }
+    }
+
     if (result.tie && result.tie.count > 1) {
       var t = result.tie;
       var tieText = t.count + ' different person-to-slot assignments all reached the top score of ' +
@@ -899,7 +1196,7 @@
         return g.filter(function (n) { return t.swingNames.indexOf(n) >= 0; });
       }).filter(function (g) { return g.length > 1; });
       tInter.forEach(function (g) {
-        tieText += ' ' + g.join(' and ') + ' entered identical preferences, so either could have been the one to miss out.';
+        tieText += ' ' + g.join(' and ') + ' entered identical weights, so either could have been the one to fall short.';
       });
       if (t.swingNames.length) {
         tieText += ' The assignment changed between the tied schedules for: ' + t.swingNames.join(', ') + '.';
@@ -914,67 +1211,23 @@
       out.push({
         h: 'No-work window: ' + p.name,
         text: [p.name + ' may never work between ' + S.DAYS[w.startDay] + ' ' + fmtHour(w.startHour) +
-          ' and ' + S.DAYS[w.endDay] + ' ' + fmtHour(w.endHour) + '. ' +
-          p.name + ' is on slot ' + a.slotLetter + ' (starting ' + fmtHour(a.slotStart) +
-          ') because that is the workable shift the rest of the team least wants. ' +
-          'The rest days (' + a.restDayNames.join('\u2013') +
-          ') still keep every working hour outside that window.']
+          ' and ' + S.DAYS[w.endDay] + ' ' + fmtHour(w.endHour) + '. Both of ' + p.name +
+          '\u2019s weight lists are flattened to equal points by rule, so they are indifferent and take the ' +
+          'leftover shift that keeps the window safe. Their assigned slot is ' + a.slotLetter +
+          ' (starting ' + fmtHour(a.slotStart) + '), with rest days ' + a.restDayNames.join('\u2013') + '.']
       });
     });
-
-    var prioritySum = 0, softSum = 0, maxPriority = 0;
-    result.assignment.forEach(function (a) {
-      prioritySum += a.priorityPoints;
-      softSum += a.softPoints;
-      var ap = personByName(people, a.name);
-      if (ap) {
-        var arr = a.priority === 'rest' ? ap.restWeights : ap.shiftWeights;
-        maxPriority += arr.reduce(function (m, v) { return v > m ? v : m; }, 0);
-      }
-    });
-    out.push({
-      h: 'Priority weights',
-      text: ['The team was awarded ' + prioritySum + ' of a possible ' + maxPriority +
-        ' points on their priority dimension, and ' + softSum +
-        ' points on their secondary dimension. The solver maximises the total, so a person can fall short only when a hard limit (coverage minimum, a no-work window, or a carried-over guarantee) blocks the higher-weighted choice.']
-    });
-
-    if (result.guarantees && result.guarantees.owed.length > 0) {
-      var g = result.guarantees;
-      var gText = [];
-      g.satisfied.forEach(function (item) {
-        var what = item.dimension === 'slot'
-          ? 'slot ' + S.SLOT_LETTERS[item.value]
-          : 'rest days ' + pairLabel(item.value);
-        gText.push(item.name + ' got ' + what + ' because they missed their top-pick ' +
-          (item.dimension === 'slot' ? 'shift slot' : 'rest-day pair') +
-          ' last run and it was guaranteed this run.');
-      });
-      g.dropped.forEach(function (item) {
-        var what = item.dimension === 'slot'
-          ? 'slot ' + S.SLOT_LETTERS[item.value]
-          : 'rest days ' + pairLabel(item.value);
-        gText.push('The guarantee for ' + item.name + ' (' + what +
-          ') could not be satisfied: ' + item.reason + '.');
-      });
-      out.push({
-        h: 'Guarantees carried over from the last run',
-        text: gText.length ? gText : ['No guarantees were applied this run.']
-      });
-    }
 
     result.assignment.forEach(function (a) {
       var dim = a.priority === 'rest' ? 'rest-day pair' : 'shift slot';
       var other = a.priority === 'rest' ? 'shift slot' : 'rest-day pair';
-      var ap = personByName(people, a.name);
-      var arr = ap ? (a.priority === 'rest' ? ap.restWeights : ap.shiftWeights) : [];
-      var best = arr.reduce(function (m, v) { return v > m ? v : m; }, 0);
-      var full = a.priorityPoints >= best;
-      var text = a.name + ' received ' + a.priorityPoints + ' weight points for their ' + dim +
-        ' (their priority) and ' + a.softPoints + ' points for their ' + other + '. ' +
-        (full
-          ? 'That is the highest weight they gave any ' + dim + '.'
-          : 'A higher-weighted ' + dim + ' was already taken or would have broken the hard coverage minimum, so the best remaining option was used.');
+      var fe = fairnessByName(f, a.name);
+      var text = a.name + ' earned ' + a.priorityPoints + ' points on their priority ' + dim +
+        ' and ' + a.softPoints + ' points on their ' + other + '.';
+      if (fe && typeof fe.ideal === 'number' && fe.ideal > 0) {
+        text += ' Their own ideal total was ' + fe.ideal + ' points, so this run they reached ' +
+          fmtSatisfaction(fe) + ' of it.';
+      }
       out.push({
         h: a.name + ' \u2014 ' + a.priorityPoints + ' priority points',
         text: [text]

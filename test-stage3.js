@@ -25,8 +25,6 @@ function eq(label, actual, expected) {
 
 var SNAPSHOT_KEYS = ['outerChecked', 'totalOuter', 'innerChecked', 'hasBest', 'phase'];
 
-// Throw loudly (rejects the async solve) if a snapshot is not a well-formed
-// progress object. This is exactly the failure mode described in PROMPT.md.
 function assertSnapshot(s) {
   if (s === undefined || s === null) {
     throw new Error('onProgress received ' + String(s) + ' instead of a snapshot object');
@@ -45,9 +43,6 @@ function assertSnapshot(s) {
   }
 }
 
-function fmtHour(h) { return (h < 10 ? '0' : '') + h + ':00'; }
-
-// A stable per-person signature, used to compare two schedules.
 function scheduleKey(assignment) {
   return assignment
     .map(function (a) { return a.name + '|slot=' + a.slotIndex + '|rest=' + S.pairKey(a.restDays); })
@@ -55,16 +50,12 @@ function scheduleKey(assignment) {
     .join(';');
 }
 
-// =====================================================================
 (async function main() {
   console.log('Stage 3 tests — generator solver / solveAsync()\n');
 
   // -------------------------------------------------------------------
   console.log('1. solve() on the default dataset is deterministic');
   // -------------------------------------------------------------------
-  // The domain is open (phase 'open-domain'); the grid starts at 00:00.
-  // Hard properties are covered by verify.js, so here we just pin the
-  // result down and check that a second identical run matches it.
   var sync = S.solve(S.defaultPeople, config, {});
   var syncAgain = S.solve(S.defaultPeople, config, {});
   check('ok', sync.ok === true);
@@ -81,7 +72,7 @@ function scheduleKey(assignment) {
   var count = 0, shapes = {}, last = null;
   var asyncDefault = await S.solveAsync(S.defaultPeople, config, {
     onProgress: function (s) {
-      assertSnapshot(s); // throws -> rejects the promise
+      assertSnapshot(s);
       count++;
       shapes[Object.keys(s).sort().join(',')] = true;
       last = s;
@@ -98,10 +89,6 @@ function scheduleKey(assignment) {
   // -------------------------------------------------------------------
   console.log('\n3. Forced long run: impossible minimum coverage');
   // -------------------------------------------------------------------
-  // 8 people, one 12-hour shift every 3 hours, minimum 3 per hour. Because
-  // everyone must rest 2 days, 3-per-hour is impossible, and the capacity is
-  // still >= 1 in most hours so the inner rest-day search cannot short-circuit
-  // — it must exhaust a large space before concluding "infeasible".
   var longPeople = [];
   for (var i = 0; i < 8; i++) {
     var longShiftW = [];
@@ -123,13 +110,11 @@ function scheduleKey(assignment) {
   var t0 = Date.now();
   var longRes = await S.solveAsync(longPeople, longCfg, {
     onProgress: function (s) {
-      assertSnapshot(s); // throws -> rejects the promise
+      assertSnapshot(s);
       longCount++;
       longShapes[Object.keys(s).sort().join(',')] = true;
       if (s.innerChecked > maxInner) maxInner = s.innerChecked;
       if (s.phase) phaseSeen[s.phase] = true;
-      // An "inner" snapshot arrives while the same outer arrangement is still
-      // being worked on (i.e. it did not come from the once-per-outer yield).
       if (s.outerChecked === prevOuter) innerSnapshots++;
       prevOuter = s.outerChecked;
       if (s.hasBest === false) sawBestFalse = true;
@@ -152,9 +137,6 @@ function scheduleKey(assignment) {
   // -------------------------------------------------------------------
   console.log('\n4. Nested yield* path under a small threshold');
   // -------------------------------------------------------------------
-  // With a tiny yieldEvery the nested rest-day DFS yields internal snapshots
-  // quickly; they must still be the same shape (this is the exact bug: a bare
-  // `yield;` inside a nested generator would surface as `undefined` here).
   var nestedCount = 0, nestedShapes = {};
   var nestedRes = await S.solveAsync(longPeople, longCfg, {
     yieldEvery: 50,
@@ -168,7 +150,6 @@ function scheduleKey(assignment) {
   check('nested run produced many snapshots', nestedCount > longCount);
   eq('nested run used exactly one snapshot shape', Object.keys(nestedShapes).length, 1);
 
-  // -------------------------------------------------------------------
   console.log('\n----------------------------------------');
   console.log(passed + ' passed, ' + failed + ' failed');
   process.exit(failed === 0 ? 0 : 1);

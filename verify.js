@@ -1,11 +1,12 @@
 /* verify.js
  *
- * Independent, DOM-free verification tool for the Shift Coverage Solver.
+ * Independent, DOM-free verification tool for the Shift Coverage Solver v2.
  *
  * It loads the default dataset, runs the solver, and checks HARD PROPERTIES
  * of the result (coverage, valid rest pairs, valid 9-hour shifts, the
- * no-work-window rule, reproducibility and grid shape). It does NOT check for
- * one specific expected schedule.
+ * no-work-window rule, the general weight-flattening rule, fairness result
+ * consistency, reproducibility and grid shape). It does NOT check for one
+ * specific expected schedule.
  *
  * Run:  node verify.js
  * Exit code is non-zero if any assertion fails.
@@ -21,10 +22,6 @@ var defaultPeople = Scheduler.defaultPeople;
 var HOURS_PER_DAY = Scheduler.HOURS_PER_DAY;   // 24
 var DAYS_PER_WEEK = Scheduler.DAYS_PER_WEEK;   // 7
 var HOURS_PER_WEEK = Scheduler.HOURS_PER_WEEK; // 168
-
-// ---------------------------------------------------------------------
-// Tiny assert helper: prints PASS/FAIL lines, counts them.
-// ---------------------------------------------------------------------
 
 var passes = 0;
 var failures = 0;
@@ -45,16 +42,13 @@ function section(title) {
 }
 
 // ---------------------------------------------------------------------
-// Small independent helpers (re-implemented here on purpose, so the
-// verification does not just call the same code it is testing).
+// Small independent helpers (re-implemented here on purpose).
 // ---------------------------------------------------------------------
 
 function mod(n, m) {
   return ((n % m) + m) % m;
 }
 
-// Is absolute week-hour `a` inside the no-work window (Mon=0 based)?
-// Mirrors the documented rule: window is [start, end), wrapping if needed.
 function inWindow(a, win) {
   var start = win.startDay * HOURS_PER_DAY + win.startHour;
   var end = win.endDay * HOURS_PER_DAY + win.endHour;
@@ -64,20 +58,6 @@ function inWindow(a, win) {
   return false;
 }
 
-// Does at least one of the 7 adjacent rest pairs keep this person out of
-// their window at this slot? (The same "workable" idea as the solver's
-// slotWindowAllowed, implemented from satisfiesNoWorkWindow.)
-function slotWorkable(person, slotStart) {
-  if (!person.noWorkWindow) return true;
-  for (var i = 0; i < Scheduler.ADJACENT_PAIRS.length; i++) {
-    if (Scheduler.satisfiesNoWorkWindow(person, slotStart, Scheduler.ADJACENT_PAIRS[i], config)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-// A stable per-person signature used to compare two schedules.
 function scheduleKey(assignment) {
   return assignment
     .map(function (a) {
@@ -87,7 +67,6 @@ function scheduleKey(assignment) {
     .join(';');
 }
 
-// Recompute the 168-hour headcount from the assignment alone.
 function recomputeCounts(assignment) {
   var counts = new Array(HOURS_PER_WEEK).fill(0);
   assignment.forEach(function (a) {
@@ -107,8 +86,12 @@ function countsToGrid(counts) {
   return grid;
 }
 
+function approx(a, b, eps) {
+  return Math.abs(a - b) <= (eps || 1e-6);
+}
+
 // ---------------------------------------------------------------------
-// Main verification
+// Main verification (synchronous)
 // ---------------------------------------------------------------------
 
 function main(result) {
@@ -116,18 +99,13 @@ function main(result) {
   console.log('ok=' + result.ok +
     (result.ok ? (', elapsedMs=' + result.elapsedMs) : (', error=' + result.error)));
 
-  // 1. Solver succeeds --------------------------------------------------
   section('1. Solver success');
   assert(result.ok === true, 'solve() returns ok === true',
     result.ok ? '' : 'error=' + result.error);
-  if (!result.ok) {
-    // Nothing else can be checked without a schedule.
-    return;
-  }
+  if (!result.ok) return;
 
   var assignment = result.assignment;
 
-  // 2. Hard coverage, recomputed independently --------------------------
   section('2. Hard coverage (every one of 168 hours >= minCoverage)');
   var counts = recomputeCounts(assignment);
   var minHour = Infinity, maxHour = 0;
@@ -152,7 +130,6 @@ function main(result) {
   }
   assert(gridMatches, 'returned grid matches independently recomputed grid');
 
-  // 3. Rest pairs are two genuinely consecutive days -------------------
   section('3. Rest pairs are two consecutive days (cyclic, no duplicates)');
   var badPairs = [];
   assignment.forEach(function (a) {
@@ -170,14 +147,11 @@ function main(result) {
   assert(badPairs.length === 0, 'all 8 rest pairs are two consecutive days',
     badPairs.join('; '));
 
-  // 4. Shifts are exactly 9 consecutive hours, overnight wrap included --
   section('4. Each shift is exactly 9 consecutive hours with wraparound');
   var shiftProblems = [];
   assignment.forEach(function (a) {
     var restSet = {};
     a.restDays.forEach(function (d) { restSet[mod(d, DAYS_PER_WEEK)] = true; });
-
-    // Build the 9-hour block for every working day, independently.
     var built = [];
     for (var d = 0; d < DAYS_PER_WEEK; d++) {
       if (restSet[d]) continue;
@@ -186,38 +160,35 @@ function main(result) {
       }
     }
     var duty = Scheduler.personDutyHours(a.slotStart, a.restDays, config);
-
-    // No duplicates, nothing missing, same total.
     var seen = {};
-    var dup = false, gap = false;
+    var dup = false;
     built.forEach(function (x) { if (seen[x]) dup = true; seen[x] = true; });
-    if (dup) { shiftProblems.push(a.name + ': duplicate hours in shift blocks'); }
-    if (built.length !== duty.length) gap = true;
-
+    if (dup) shiftProblems.push(a.name + ': duplicate hours in shift blocks');
     var builtSorted = built.slice().sort(function (x, y) { return x - y; });
     var dutySorted = duty.slice().sort(function (x, y) { return x - y; });
-    if (builtSorted.join(',') !== dutySorted.join(',')) gap = true;
-    if (gap) { shiftProblems.push(a.name + ': shift blocks != personDutyHours'); }
+    if (builtSorted.join(',') !== dutySorted.join(',')) {
+      shiftProblems.push(a.name + ': shift blocks != personDutyHours');
+    }
   });
   assert(shiftProblems.length === 0, 'all shifts are 9 clean consecutive hours',
     shiftProblems.join('; '));
 
-  // 4b. Weighted points are present, in range and consistent ------------
-  section('4b. Weighted points (0..100) and priority/soft consistency');
+  section('4b. Weighted points (0..100) and priority/soft consistency (effective weights)');
   var byName = {};
   defaultPeople.forEach(function (p) { byName[p.name] = p; });
   var pointProblems = [];
   assignment.forEach(function (a) {
     var p = byName[a.name];
     if (!p) { pointProblems.push(a.name + ': not in dataset'); return; }
+    var ew = Scheduler.effectiveWeights(p, config);
     ['slotPoints', 'restPoints', 'priorityPoints', 'softPoints'].forEach(function (f) {
       var v = a[f];
       if (typeof v !== 'number' || !isFinite(v) || v < 0 || v > 100) {
         pointProblems.push(a.name + ': ' + f + ' = ' + v + ' out of range');
       }
     });
-    var expectedSlot = Scheduler.weightOf(p.shiftWeights, a.slotIndex, 'hours');
-    var expectedRest = Scheduler.weightOf(p.restWeights, a.restDays, 'rest');
+    var expectedSlot = Scheduler.weightOf(ew.shiftWeights, a.slotIndex, 'hours');
+    var expectedRest = Scheduler.weightOf(ew.restWeights, a.restDays, 'rest');
     if (a.slotPoints !== expectedSlot) {
       pointProblems.push(a.name + ': slotPoints ' + a.slotPoints + ' != ' + expectedSlot);
     }
@@ -233,17 +204,10 @@ function main(result) {
       pointProblems.push(a.name + ': softPoints ' + a.softPoints + ' != ' + expectedSoft);
     }
   });
-  assert(pointProblems.length === 0, 'every entry\'s points are in 0..100 and match the person\'s weights',
+  assert(pointProblems.length === 0, 'every entry\'s points are in 0..100 and match the person\'s effective weights',
     pointProblems.join('; '));
 
-  // 5. No-work-window rule (the slot the rest of the team least wants) ---
-  section('5. No-work-window rule (the slot the rest of the team least wants)');
-  console.log('      Condition used: the assigned slot must be workable, no workable');
-  console.log('      slot may have a strictly lower summed weight (sum of the OTHER');
-  console.log('      people\'s points for that slot), and no workable slot tied on that');
-  console.log('      sum may have a later letter (tie-break: later letter first).');
-  console.log('      A strictly-less-wanted workable slot that could not be covered');
-  console.log('      is allowed to be skipped.');
+  section('5. No-work window respected, and the general flattening rule');
   var windowPeople = defaultPeople.filter(function (p) { return p.noWorkWindow; });
   var windowProblems = [];
   windowPeople.forEach(function (person) {
@@ -257,75 +221,88 @@ function main(result) {
     if (!respected) windowProblems.push(person.name + ': satisfiesNoWorkWindow false');
     if (overlap.length > 0) windowProblems.push(person.name + ': ' + overlap.length + ' duty hours inside window');
 
-    // (b) assigned slot is the least-wanted-by-others workable slot.
-    // summedWeight(s) = sum over every OTHER person of their points for slot s;
-    // a LOWER sum means the rest of the team wants it less.
-    function summedWeight(s) {
-      var sum = 0;
-      defaultPeople.forEach(function (p) {
-        if (p.name === person.name) return;
-        sum += Scheduler.weightOf(p.shiftWeights, s, 'hours');
-      });
-      return sum;
+    // (b) general flattening: both effective dimensions are equal weights.
+    var ew = Scheduler.effectiveWeights(person, config);
+    var s0 = ew.shiftWeights[0], r0 = ew.restWeights[0];
+    var flatSlots = ew.shiftWeights.every(function (v) { return Math.abs(v - s0) < 1e-9; });
+    var flatRest = ew.restWeights.every(function (v) { return Math.abs(v - r0) < 1e-9; });
+    if (!flatSlots) windowProblems.push(person.name + ': effective shift weights are not flat');
+    if (!flatRest) windowProblems.push(person.name + ': effective rest weights are not flat');
+    if (!approx(s0, 100 / config.numSlots, 1e-9)) {
+      windowProblems.push(person.name + ': flattened slot value ' + s0 + ' != 100/numSlots');
     }
-
-    var numSlots = config.numSlots;
-    var workable = [];
-    for (var s = 0; s < numSlots; s++) {
-      if (slotWorkable(person, Scheduler.computeSlots(config, 0)[s])) workable.push(s);
-    }
-    var assignedWorkable = workable.indexOf(entry.slotIndex) >= 0;
-    if (!assignedWorkable) windowProblems.push(person.name + ': assigned slot not workable');
-
-    var assignedWeight = summedWeight(entry.slotIndex);
-    var lessWanted = workable.filter(function (s) { return summedWeight(s) < assignedWeight; });
-    var laterEqual = workable.filter(function (s) {
-      return s > entry.slotIndex && summedWeight(s) === assignedWeight;
-    });
-
-    if (lessWanted.length > 0) {
-      windowProblems.push(person.name + ': assigned ' + entry.slotLetter +
-        ' has summed weight ' + assignedWeight + ' but workable ' +
-        lessWanted.map(function (s) { return Scheduler.SLOT_LETTERS[s]; }).join(',') +
-        ' are less wanted');
-    } else if (laterEqual.length > 0) {
-      windowProblems.push(person.name + ': assigned ' + entry.slotLetter +
-        ' is beaten in the tie-break by later ' +
-        laterEqual.map(function (s) { return Scheduler.SLOT_LETTERS[s]; }).join(','));
-    } else {
-      console.log('      ' + person.name + ': assigned ' + entry.slotLetter +
-        ' (summed weight ' + assignedWeight + ') is the least-wanted workable slot.');
+    if (!approx(r0, 100 / Scheduler.ADJACENT_PAIRS.length, 1e-9)) {
+      windowProblems.push(person.name + ': flattened rest value ' + r0 + ' != 100/numPairs');
     }
   });
-  assert(windowProblems.length === 0, 'all no-work-window people got the least-wanted workable slot',
+  assert(windowProblems.length === 0, 'all no-work-window people respect their window and are flattened',
     windowProblems.join('; '));
 
-  // 6. Reproducibility --------------------------------------------------
+  section('5b. Window holders have ~100% satisfaction / zero shortfall');
+  var fair = result.fairness;
+  assert(fair && Array.isArray(fair.entries), 'result.fairness present with entries',
+    fair ? '' : 'missing');
+  if (fair && Array.isArray(fair.entries)) {
+    var winSatProblems = [];
+    windowPeople.forEach(function (person) {
+      var fe = fair.entries.filter(function (e) { return e.name === person.name; })[0];
+      if (!fe) { winSatProblems.push(person.name + ': no fairness entry'); return; }
+      if (!approx(fe.satisfaction, 1, 1e-6)) {
+        winSatProblems.push(person.name + ': satisfaction ' + fe.satisfaction + ' != 1');
+      }
+      if (!approx(fe.shortfall, 0, 1e-6)) {
+        winSatProblems.push(person.name + ': shortfall ' + fe.shortfall + ' != 0');
+      }
+    });
+    assert(winSatProblems.length === 0, 'window holders sit at ~100% satisfaction',
+      winSatProblems.join('; '));
+  }
+
+  section('5c. result.fairness is internally consistent');
+  if (fair) {
+    var consistency = [];
+    if (!approx(fair.achievedTotal, result.score, 1e-6)) {
+      consistency.push('achievedTotal != score');
+    }
+    if (!(fair.maxTotal >= fair.achievedTotal - 1e-9)) {
+      consistency.push('maxTotal < achievedTotal');
+    }
+    if (typeof fair.bandPercent !== 'number') consistency.push('bandPercent not a number');
+    if (result.maxTotal !== fair.maxTotal) consistency.push('result.maxTotal != fairness.maxTotal');
+    if (result.band !== Scheduler.FAIRNESS_BAND) consistency.push('result.band != FAIRNESS_BAND');
+    if (fair.entries.length !== defaultPeople.length) consistency.push('entries count != people count');
+    var maxShort = -Infinity;
+    fair.entries.forEach(function (e) {
+      if (e.ideal <= 0) return;
+      if (!approx(e.shortfall, 1 - e.satisfaction, 1e-9)) consistency.push(e.name + ': shortfall != 1 - satisfaction');
+      if (e.shortfall > maxShort) maxShort = e.shortfall;
+    });
+    if (!approx(fair.worstShortfall, maxShort, 1e-9)) consistency.push('worstShortfall != max entry shortfall');
+    assert(consistency.length === 0, 'fairness totals, band, entries and worst all match',
+      consistency.join('; '));
+  }
+
   section('6. Reproducibility (two identical runs)');
   var result2 = Scheduler.solve(defaultPeople, config);
   var same = result2.ok === true &&
     scheduleKey(assignment) === scheduleKey(result2.assignment);
-  assert(same, 'solve() twice gives the same schedule',
-    same ? '' : 'schedules differ');
+  assert(same, 'solve() twice gives the same schedule', same ? '' : 'schedules differ');
 
-  // 7. Grid shape and total --------------------------------------------
   section('7. Grid shape and total person-hours');
   var grid = result.grid;
   var shapeOk = Array.isArray(grid) && grid.length === DAYS_PER_WEEK;
   grid.forEach(function (row) {
     if (!Array.isArray(row) || row.length !== HOURS_PER_DAY) shapeOk = false;
   });
-  assert(shapeOk, 'grid is 7 rows x 24 columns',
-    shapeOk ? '' : 'unexpected grid shape');
+  assert(shapeOk, 'grid is 7 rows x 24 columns', shapeOk ? '' : 'unexpected grid shape');
 
-  var workingDays = DAYS_PER_WEEK - 2; // 7 consecutive days, 2 rest days
+  var workingDays = DAYS_PER_WEEK - 2;
   var expectedTotal = config.shiftLen * workingDays * defaultPeople.length;
   var total = 0;
   grid.forEach(function (row) { row.forEach(function (v) { total += v; }); });
   assert(total === expectedTotal, 'grid total === shiftLen * workdays * people (' + expectedTotal + ')',
     'got ' + total);
 
-  // ----- informational output -----------------------------------------
   section('Information: final schedule');
   assignment.forEach(function (a) {
     console.log('  ' + pad(a.name, 9) +
@@ -336,6 +313,7 @@ function main(result) {
       ' (priority points ' + a.priorityPoints + ', soft points ' + a.softPoints + ')');
   });
   console.log('  score=' + result.score +
+    '  maxTotal=' + result.maxTotal +
     '  minCoverage=' + result.minCoverage +
     '  maxCoverage=' + result.maxCoverage +
     '  totalPersonHours=' + result.totalPersonHours);
@@ -344,16 +322,8 @@ function main(result) {
     '  elapsedMs=' + result.elapsedMs);
 }
 
-function pad(s, n) {
-  s = String(s);
-  while (s.length < n) s += ' ';
-  return s;
-}
-function pad2(s) {
-  s = String(s);
-  while (s.length < 5) s = '0' + s;
-  return s;
-}
+function pad(s, n) { s = String(s); while (s.length < n) s += ' '; return s; }
+function pad2(s) { s = String(s); while (s.length < 5) s = '0' + s; return s; }
 
 // ---------------------------------------------------------------------
 // Async progress-snapshot regression
@@ -378,9 +348,8 @@ async function asyncCheck(syncResult) {
       }
       var fields = ['outerChecked', 'totalOuter', 'innerChecked', 'hasBest', 'phase'];
       for (var i = 0; i < fields.length; i++) {
-        var f = fields[i];
-        if (!(f in snap)) {
-          badSnapshot = 'snapshot ' + snapshots + ' missing ' + f;
+        if (!(fields[i] in snap)) {
+          badSnapshot = 'snapshot ' + snapshots + ' missing ' + fields[i];
           throw new Error(badSnapshot);
         }
       }
@@ -395,8 +364,7 @@ async function asyncCheck(syncResult) {
     }
   });
 
-  assert(badSnapshot === null, 'every progress snapshot is well-formed',
-    badSnapshot || '');
+  assert(badSnapshot === null, 'every progress snapshot is well-formed', badSnapshot || '');
   console.log('      snapshots observed: ' + snapshots);
   console.log('      async ok=' + asyncResult.ok);
   assert(asyncResult.ok === true, 'solveAsync() returns ok === true',
@@ -405,10 +373,6 @@ async function asyncCheck(syncResult) {
     scheduleKey(syncResult.assignment) === scheduleKey(asyncResult.assignment),
     'async assignment deep-equals sync assignment');
 }
-
-// ---------------------------------------------------------------------
-// Run
-// ---------------------------------------------------------------------
 
 function finish() {
   console.log('');
@@ -419,12 +383,10 @@ function finish() {
   process.exit(failures ? 1 : 0);
 }
 
-// Run async section after the synchronous one so the sync result is available.
 var syncResult = Scheduler.solve(defaultPeople, config);
 main(syncResult);
 
 asyncCheck(syncResult).then(function () {
-  // finish() may already have run inside main(); if so this is unreachable.
   finish();
 }).catch(function (err) {
   failures++;

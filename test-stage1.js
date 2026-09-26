@@ -28,27 +28,20 @@ function eq(label, actual, expected) {
         JSON.stringify(actual) === JSON.stringify(expected));
 }
 
+function approx(a, b, eps) { return Math.abs(a - b) <= (eps || 1e-9); }
+
 console.log('Stage 1 tests — scheduler.js\n');
 
 // ---------------------------------------------------------------------
 console.log('1. Slot math');
-// The grid is fixed at 00:00 offset 0. There is no "exact start" lock any
-// more: the candidate domain is open, so the old offsetForExactStart /
-// slotForExactStart helpers were removed and are gone from this test.
 eq('computeSlots(offset 0)', S.computeSlots(config, 0), [0, 3, 6, 9, 12, 15, 18, 21]);
 eq('computeSlots(offset 1)', S.computeSlots(config, 1), [1, 4, 7, 10, 13, 16, 19, 22]);
 
 // ---------------------------------------------------------------------
 console.log('\n2. Overnight wraparound — a 22:00 shift runs into the next day');
-var wrapAssignment = [{
-  name: 'NightOwl',
-  slotIndex: 7,
-  slotStart: 22,
-  restDays: []
-}];
+var wrapAssignment = [{ name: 'NightOwl', slotIndex: 7, slotStart: 22, restDays: [] }];
 var wrapGrid = S.buildCoverageGrid(wrapAssignment, config);
 
-// Expected duty for the Monday shift: 22,23 then Tue 00..06.
 var dutySet = {};
 S.personDutyHours(22, [], config).forEach(function (a) { dutySet[a] = true; });
 eq('Mon 22:00 shift covers abs hours 22,23,24..30',
@@ -59,8 +52,6 @@ check('Mon 23:00 covered', wrapGrid[0][23] === 1);
 check('Tue 00:00 covered (wrapped)', wrapGrid[1][0] === 1);
 check('Tue 06:00 covered (last hour)', wrapGrid[1][6] === 1);
 check('Tue 07:00 NOT covered', wrapGrid[1][7] === 0);
-// Cyclic week wrap: with only Sunday worked, the Sunday 22:00 shift spills
-// into Monday 00:00-06:00 of this same week.
 var sundayWrap = S.buildCoverageGrid(
   [{ name: 'X', slotIndex: 7, slotStart: 22, restDays: [0, 1, 2, 3, 4, 5] }], config);
 check('Sun-night shift covers Sun 22,23 and Mon 00..06 via week wrap',
@@ -69,22 +60,23 @@ check('Sun-night shift covers Sun 22,23 and Mon 00..06 via week wrap',
 check('Sun-night shift does NOT reach Mon 07:00', sundayWrap[0][7] === 0);
 
 // ---------------------------------------------------------------------
-console.log('\n3. Daphine — no-work window Fri 18:00 -> Sat 18:00');
+console.log('\n3. Daphine — no-work window Fri 18:00 -> Sat 18:00 and weight flattening');
 var daphine = S.defaultPeople.filter(function (p) { return p.name === 'Daphine'; })[0];
 check('Daphine found in default dataset', !!daphine);
-check('Daphine has no exact-start lock (open domain)', daphine && daphine.exactStart == null);
 check('Daphine prioritises rest', daphine && daphine.priority === 'rest');
 check('Daphine shiftWeights has 8 entries and restWeights has 7',
       daphine && daphine.shiftWeights.length === 8 && daphine.restWeights.length === 7);
-check('Daphine top rest pair (highest weight) is Fri-Sat',
-      daphine && S.weightOf(daphine.restWeights, [4, 5], 'rest') ===
-        Math.max.apply(null, daphine.restWeights));
 check('Daphine no-work window is Fri 18:00 -> Sat 18:00',
       daphine && daphine.noWorkWindow &&
       daphine.noWorkWindow.startDay === 4 && daphine.noWorkWindow.startHour === 18 &&
       daphine.noWorkWindow.endDay === 5 && daphine.noWorkWindow.endHour === 18);
 
-// Slots are still global; these checks are about duty hours versus the window.
+var daphEff = S.effectiveWeights(daphine, config);
+check('effective shift weights all equal 100/numSlots',
+      daphEff.shiftWeights.every(function (v) { return approx(v, 100 / config.numSlots); }));
+check('effective rest weights all equal 100/numPairs',
+      daphEff.restWeights.every(function (v) { return approx(v, 100 / S.ADJACENT_PAIRS.length); }));
+
 check('Daphine at 19:00 with Thu-Fri off satisfies the window',
       S.satisfiesNoWorkWindow(daphine, 19, [3, 4], config) === true);
 check('Daphine at 19:00 WITHOUT Friday off violates the window',
@@ -96,8 +88,6 @@ check('Non-window person always passes',
 
 // ---------------------------------------------------------------------
 console.log('\n4. Hand-built full 8-person assignment -> coverage grid');
-// A known gap-free layout on the offset-1 grid (slots 1,4,...,22), with
-// Daphine on slot G (19:00) and Thu-Fri off. Every slot used exactly once.
 var slotsOff1 = S.computeSlots(config, 1);
 var full = [
   { person: S.defaultPeople[0], name: 'Cindy',   slotIndex: 0, slotStart: slotsOff1[0], restDays: [2, 3] },
@@ -124,24 +114,19 @@ check('max coverage is 3 (nothing overstaffed)', max === 3);
 check('meetsCoverage(grid, 2) is true', S.meetsCoverage(grid, 2) === true);
 check('meetsCoverage(grid, 3) is false', S.meetsCoverage(grid, 3) === false);
 
-console.log('\n  Coverage by day (headcount per hour):');
-S.DAYS.forEach(function (day, d) {
-  console.log('    ' + day + '  ' + grid[d].join(' '));
-});
-
 // ---------------------------------------------------------------------
-console.log('\n5. scoreAssignment — weighted points, higher is better');
-// Higher is better. A person's priority dimension is weighted 100, the other 1,
-// and both multiply the 0..100 points transcribed from weighted.txt.
-var daphSheets = [{ person: daphine, name: 'Daphine', slotIndex: 6, slotStart: 18, restDays: [4, 5] }];
-// priority rest: 100 * restPoints(35, Fri-Sat) + 1 * slotPoints(30, 18:00) = 3530.
-eq('Daphine on her top slot (18:00) and top rest pair scores 100*35 + 30 = 3530',
-   S.scoreAssignment(daphSheets, config), 3530);
+console.log('\n5. scoreAssignment — weighted points on EFFECTIVE weights, higher is better');
+// Daphine has a no-work window, so her effective weights are flat: every slot
+// is 100/8 = 12.5 and every rest pair is 100/7. Priority 'rest' means
+// 100 * (100/7) + 1 * 12.5 = 1441.0714..., whichever slot/pair she is given.
+var daphFlat = 100 * (100 / S.ADJACENT_PAIRS.length) + 1 * (100 / config.numSlots);
+var daphAny = [{ person: daphine, name: 'Daphine', slotIndex: 6, slotStart: 18, restDays: [4, 5] }];
+check('Daphine scores her flat total 100*(100/7) + 12.5 whichever option',
+  approx(S.scoreAssignment(daphAny, config), daphFlat, 1e-9));
 
-var daphOff = [{ person: daphine, name: 'Daphine', slotIndex: 5, slotStart: 15, restDays: [0, 1] }];
-// priority rest: 100 * restPoints(7, Mon-Tue) + 1 * slotPoints(20, 15:00) = 720.
-eq('Daphine Mon-Tue (7) and 15:00 (20) scores 100*7 + 20 = 720',
-   S.scoreAssignment(daphOff, config), 720);
+var daphAny2 = [{ person: daphine, name: 'Daphine', slotIndex: 0, slotStart: 0, restDays: [0, 1] }];
+check('Daphine scores the same flat total on a different option',
+  approx(S.scoreAssignment(daphAny2, config), daphFlat, 1e-9));
 
 var cindy = S.defaultPeople[0];
 var cindyBest = [{ person: cindy, name: 'Cindy', slotIndex: 5, slotStart: 15, restDays: [0, 1] }];

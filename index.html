@@ -20,20 +20,25 @@
       <p>
         A team covers a 24-hour day with 8 nine-hour shifts, staggered 3 hours apart.
         Every person works 5 days and rests 2. This page captures each person's
-        preference weights (0 to 100, higher meaning more wanted) and any hard personal
-        constraints.
+        preference weights (0 to 100 points, higher meaning more wanted) and any hard
+        personal constraints.
       </p>
       <p>
         When the solver is run, it searches every possible assignment <strong>in this
-        browser</strong> &mdash; there is no server and no precomputed answer. The same
-        inputs always produce the same result, and nothing about the result is hidden or
-        hardcoded.
+        browser</strong> &mdash; there is no server and no precomputed answer. It then
+        compares the result against each person's own ideal and against earlier runs,
+        so the scores are about points earned and satisfaction, not about who got their
+        one favourite. The same inputs always produce the same result, and nothing about
+        the result is hidden or hardcoded.
       </p>
       <p class="how-head">How to check it yourself</p>
       <ol class="how">
         <li>Change a weight below (for example, set one person's rest-day pair to 0).</li>
-        <li>Run the solver and confirm the schedule changes to reflect that edit.</li>
+        <li>Run the solver and confirm the schedule, points and satisfaction change to
+            reflect that edit.</li>
         <li>Change it back and confirm the original schedule returns.</li>
+        <li>Look at the fairness view before and after a run: the running points and
+            satisfaction for each person move, and the worst-off person is named plainly.</li>
         <li>Open the page source: <code>scheduler.js</code> holds the search and scoring,
             <code>app.js</code> holds this interface. Both are plain, readable JavaScript.</li>
       </ol>
@@ -59,40 +64,50 @@
       <p class="note">
         Give each rest-day pair and each shift slot a weight from 0 to 100; higher means
         more wanted. Blank or out-of-range values count as 0, and the running total for
-        each dimension is shown next to it. The highlighted priority is the dimension
-        treated as a requirement.
+        each dimension is shown next to it. The highlighted priority is the dimension a
+        person cares about most.
+      </p>
+      <p class="note">
+        Anyone with a no-work window is treated as indifferent by rule: both of their
+        weight lists are flattened to equal values and their boxes are locked, because
+        their window already decides which shift they can take.
       </p>
       <p class="note">All eight slots start at fixed times beginning 00:00.</p>
       <div id="people-list" class="people-list"></div>
     </section>
 
-    <!-- 4. Cross-run fairness (rotation) -->
+    <!-- 4. Cross-run fairness -->
     <section class="card" id="fairness-section">
-      <h2>Cross-run fairness (rotation)</h2>
+      <h2>Cross-run fairness</h2>
       <p class="note">
-        Every finished run is remembered in this browser. Next time, anyone who missed their
-        first choice is given a guarantee so the same person is not unlucky twice in a row.
-        This is called rotation.
+        Every finished run is remembered in this browser. The fairness view works in points
+        and satisfaction: each person has a running points total and a satisfaction percentage
+        against their own ideal. The solver keeps its chosen total inside a fairness band, so
+        it will give up a few points on purpose rather than leave one person far behind, and a
+        breaker watches anyone who has been at the bottom for several runs.
       </p>
 
-      <h3 class="sub-head">Guaranteed this round</h3>
-      <div id="owed-box"></div>
+      <h3 class="sub-head">Who's behind (before this run)</h3>
+      <p class="note">
+        Sourced from the saved runs, lowest satisfaction first. Anyone near the bottom, or
+        carrying a pending breaker, is marked.
+      </p>
+      <div id="standing-box"></div>
 
       <h3 class="sub-head">Fairness ledger</h3>
       <p class="note">
-        A consecutive-miss count rises by one each time a person does not get their first
-        choice, and drops back to zero as soon as they do. A person who has a no-work window
-        is exempt from slot tracking, because that window already decides their slot; their
-        slot count stays at zero. The ledger is saved in this browser only and is never uploaded.
+        Per person: satisfaction against their own ideal (recent runs weighted more heavily),
+        cumulative points across all saved runs, and the points they earned in the most recent
+        run. This lives in this browser only and is never uploaded.
       </p>
       <div class="table-wrap">
         <table class="data-table" id="ledger-table">
           <thead>
             <tr>
               <th>Person</th>
-              <th>Slot: consecutive misses</th>
-              <th>Rest days: consecutive misses</th>
-              <th>Slot tracking</th>
+              <th>Satisfaction</th>
+              <th>Cumulative points</th>
+              <th>Latest-run points</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -100,6 +115,7 @@
       </div>
 
       <h3 class="sub-head">Recent runs</h3>
+      <p class="note">Points awarded each run, and who came away worst off.</p>
       <div id="recent-runs"></div>
 
       <h3 class="sub-head">History</h3>
@@ -112,7 +128,7 @@
         <button id="reset-history" type="button" class="mini-btn">Reset history</button>
       </div>
       <div id="reset-confirm" class="reset-confirm" hidden>
-        <span>Clear all saved rotation history in this browser? This cannot be undone.</span>
+        <span>Clear all saved fairness history in this browser? This cannot be undone.</span>
         <button id="reset-confirm-yes" type="button" class="mini-btn">Yes, clear history</button>
         <button id="reset-confirm-no" type="button" class="mini-btn">Cancel</button>
       </div>
@@ -178,6 +194,10 @@
           <div id="heatmap-legend" class="legend"></div>
         </section>
         <section class="card">
+          <h3>Fairness after this run</h3>
+          <div id="fairness-result"></div>
+        </section>
+        <section class="card">
           <h3>Trade-offs and reasoning</h3>
           <div id="explanation-body"></div>
         </section>
@@ -187,7 +207,7 @@
   </main>
 
   <footer class="page-foot">
-    <span>The solver runs in this browser &mdash; press Run solver to compute the weekly schedule. Rotation history is saved in this browser only.</span>
+    <span>The solver runs in this browser &mdash; press Run solver to compute the weekly schedule. Fairness history is saved in this browser only.</span>
   </footer>
 
   <script src="scheduler.js"></script>
