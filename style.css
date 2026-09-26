@@ -142,49 +142,32 @@ code { background: #ececea; padding: 1px 4px; border: 1px solid var(--line); }
 
 .dimension { margin-bottom: 16px; }
 
-.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 10px; }
-.chip {
-  font-family: var(--mono);
-  font-size: 13px;
-  background: var(--card-bg);
-  color: var(--ink);
-  border: 1px solid var(--line-strong);
-  padding: 5px 10px;
-  cursor: pointer;
+.dim-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: baseline;
+  justify-content: space-between;
 }
-.chip:hover { border-color: var(--ink); }
-.chip.selected { background: var(--black); color: #ffffff; border-color: var(--black); }
-.chip.marker::after { content: ""; }
+.dim-total { color: var(--muted); }
 
-.rank-wrap { display: flex; gap: 10px; align-items: flex-start; }
-.rank-caption { color: var(--muted); min-width: 120px; padding-top: 4px; }
-.rank-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  border: 1px solid var(--line);
-  min-width: 260px;
-  min-height: 34px;
-  background: var(--field-bg);
+.weight-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 8px;
+  margin-top: 8px;
 }
-.rank-list:empty::before {
-  content: "none selected";
-  color: var(--muted);
-  display: block;
-  padding: 6px 10px;
-}
-.rank-item {
+.weight-cell {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 8px;
-  padding: 5px 10px;
-  background: var(--card-bg);
-  border-bottom: 1px solid var(--line);
-  cursor: grab;
+  border: 1px solid var(--line);
+  background: var(--field-bg);
+  padding: 5px 8px;
 }
-.rank-item:last-child { border-bottom: 0; }
-.rank-item .rank-num { color: var(--muted); min-width: 18px; }
-.rank-item.dragging { background: #ececea; }
+.weight-name { color: var(--ink); font-size: 13px; }
+.weight-input { width: 68px; text-align: right; }
 
 /* Advanced */
 .advanced { border-top: 1px dashed var(--line); padding-top: 10px; }
@@ -205,12 +188,8 @@ select, input[type="number"] {
 }
 select:disabled, input:disabled { color: var(--muted); background: #f0f0ee; }
 
-/* Status (used once results exist; colour never stands alone) */
-.met { color: var(--green); }
-.met::before { content: "\2713\00a0"; }
-.missed { color: var(--red); }
-.missed::before { content: "\2717\00a0"; }
-.data-table tbody tr.row-missed td { background: var(--red-bg); }
+/* Points column */
+.data-table tbody td.points { font-weight: 700; text-align: right; }
 
 /* Run, progress, log */
 .sub-head { margin-top: 18px; }
@@ -346,5 +325,5 @@ table.heatmap th.day, table.heatmap td.day {
 
 @media (max-width: 640px) {
   .person-name { width: 100%; }
-  .rank-wrap { flex-direction: column; }
+  .weight-grid { grid-template-columns: 1fr 1fr; }
 }

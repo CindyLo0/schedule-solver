@@ -27,6 +27,75 @@ function fmtHour(h) {
   return (h < 10 ? '0' : '') + h + ':00';
 }
 
+// ---- independent helpers (re-implemented here on purpose) -------------
+function pairKey(p) { var a = p[0], b = p[1]; return a <= b ? a + ',' + b : b + ',' + a; }
+
+// Points for a value, straight from a weights array (no solver call).
+function weightManual(weights, value, kind) {
+  weights = weights || [];
+  if (kind === 'rest') {
+    var k = pairKey(value);
+    for (var i = 0; i < S.ADJACENT_PAIRS.length; i++) {
+      if (pairKey(S.ADJACENT_PAIRS[i]) === k) return weights[i] || 0;
+    }
+    return 0;
+  }
+  var v = weights[value];
+  return typeof v === 'number' ? v : 0;
+}
+
+// A slot is "workable" for a window person when at least one rest pair keeps
+// them out of the window at that slot (the solver's slotWindowAllowed).
+function slotWorkableManual(person, slotStart, cfg) {
+  if (!person.noWorkWindow) return true;
+  for (var i = 0; i < S.ADJACENT_PAIRS.length; i++) {
+    if (S.satisfiesNoWorkWindow(person, slotStart, S.ADJACENT_PAIRS[i], cfg)) return true;
+  }
+  return false;
+}
+
+// Sum of every OTHER person's points for a slot. LOWER = least wanted.
+function summedOthersWeight(people, personName, slot) {
+  var sum = 0;
+  people.forEach(function (p) {
+    if (p.name === personName) return;
+    sum += weightManual(p.shiftWeights, slot, 'hours');
+  });
+  return sum;
+}
+
+// The §4 property, checked directly: window respected, assigned slot workable,
+// no workable slot with a strictly lower summed-others'-weight, and no tied
+// workable slot with a later letter. Returns null when satisfied.
+function ruleProblemFor(person, entry, people, cfg) {
+  if (!person.noWorkWindow) return null;
+  if (!S.satisfiesNoWorkWindow(person, entry.slotStart, entry.restDays, cfg)) {
+    return person.name + ': window violated';
+  }
+  var slots = S.computeSlots(cfg, 0);
+  var workable = [];
+  for (var s = 0; s < cfg.numSlots; s++) {
+    if (slotWorkableManual(person, slots[s], cfg)) workable.push(s);
+  }
+  if (workable.indexOf(entry.slotIndex) < 0) return person.name + ': assigned slot not workable';
+  var assigned = summedOthersWeight(people, person.name, entry.slotIndex);
+  var lower = workable.filter(function (s) {
+    return summedOthersWeight(people, person.name, s) < assigned;
+  });
+  if (lower.length) {
+    return person.name + ': assigned ' + entry.slotLetter + ' but workable ' +
+      lower.map(function (s) { return S.SLOT_LETTERS[s]; }).join(',') + ' are less wanted';
+  }
+  var laterEqual = workable.filter(function (s) {
+    return s > entry.slotIndex && summedOthersWeight(people, person.name, s) === assigned;
+  });
+  if (laterEqual.length) {
+    return person.name + ': tie-break should prefer later ' +
+      laterEqual.map(function (s) { return S.SLOT_LETTERS[s]; }).join(',');
+  }
+  return null;
+}
+
 // =====================================================================
 console.log('Stage 2 tests — exhaustive solve()\n');
 console.log('1. Default dataset');
@@ -50,14 +119,28 @@ var daph = null;
 res.assignment.forEach(function (a) { if (a.name === 'Daphine') daph = a; });
 var daphPerson = S.defaultPeople.filter(function (p) { return p.name === 'Daphine'; })[0];
 check('Daphine present', !!daph);
-// Current open-domain result: Daphine takes slot H (21:00), the workable slot
-// the REST of the team least wants (highest sum of their ranks), and rest pair
-// Fri-Sat, which still keeps her out of her no-work window.
-check('Daphine gets slot H', daph && daph.slotLetter === 'H');
-check('Daphine starts at 21:00', daph && daph.slotStart === 21);
-check('Daphine rests Fri-Sat', daph && S.pairKey(daph.restDays) === S.pairKey([4, 5]));
+// §4: Daphine must get the workable slot the REST of the team least wants
+// (lowest summed points), later letter first as a tie-break. The exact letter
+// is determined by the data, not hardcoded.
+var daphRule = daph && ruleProblemFor(daphPerson, daph, S.defaultPeople, config);
+check('Daphine gets the least-wanted workable slot (§4)', daphRule === null,
+  daphRule || '');
 check('Daphine is never on duty inside her no-work window',
       daph && S.satisfiesNoWorkWindow(daphPerson, daph.slotStart, daph.restDays, config) === true);
+
+// The assigned entries must carry exactly the frozen weighted shape.
+var ENTRY_FIELDS = ['name', 'slotIndex', 'slotLetter', 'slotStart', 'restDays',
+  'restDayNames', 'priority', 'slotPoints', 'restPoints', 'priorityPoints', 'softPoints'];
+var shapeProblem = null;
+res.assignment.forEach(function (a) {
+  var keys = Object.keys(a).sort();
+  if (keys.join(',') !== ENTRY_FIELDS.slice().sort().join(',')) {
+    shapeProblem = a.name + ': keys ' + keys.join(',');
+  }
+  if (a.slotPoints < 0 || a.slotPoints > 100) shapeProblem = a.name + ': slotPoints out of range';
+  if (a.restPoints < 0 || a.restPoints > 100) shapeProblem = a.name + ': restPoints out of range';
+});
+check('every assignment entry has the exact frozen fields', shapeProblem === null, shapeProblem || '');
 
 console.log('\n  Search stats: ' + JSON.stringify(res.stats));
 console.log('  Phase: ' + res.phase + '   Elapsed: ' + elapsed + ' ms\n');
@@ -67,8 +150,7 @@ res.assignment.forEach(function (a) {
     '  ' + fmtHour(a.slotStart) + '-' + fmtHour((a.slotStart + config.shiftLen) % 24) +
     '   rest ' + a.restDayNames.join('-') +
     '   priority=' + a.priority +
-    '  prank=' + a.priorityRank + (a.priorityMet ? ' (met)' : ' (not met)') +
-    '  soft=' + a.softRank);
+    '  points=' + a.priorityPoints + '/' + a.softPoints);
 });
 
 // =====================================================================
@@ -81,39 +163,26 @@ check('min = 2 and max = 3 are the only values', mn === 2 && mx === 3);
 
 // =====================================================================
 console.log('\n3. Shortcut safety: real solver vs dumb brute force (small cases)');
-console.log('   Brute force model (current, open domain):');
+console.log('   Brute force model (weighted, open domain):');
 console.log('     - every person may take any of cfg.numSlots slots and any of');
-console.log('       the 7 consecutive rest pairs, even ones they did not rank;');
+console.log('       the 7 consecutive rest pairs, even ones with zero points;');
 console.log('     - hard coverage on all 168 hours and each no-work window;');
-console.log('     - weighted rank penalty (priority dimension * 100, other * 1);');
-console.log('     - window people are pinned to the first workable slot the REST');
-console.log('       of the team least wants (most-disliked first) that admits a');
-console.log('       feasible schedule, exactly as the solver does. No pruning or');
-console.log('       ordering shortcuts.');
+console.log('     - weighted reward (priority dimension * 100, other * 1) of the');
+console.log('       0..100 points, HIGHER better;');
+console.log('     - window people are pinned to the least-wanted-by-others workable');
+console.log('       slot (lowest summed points first) that admits a feasible');
+console.log('       schedule, exactly as the solver does. No pruning or ordering');
+console.log('       shortcuts.');
 // =====================================================================
-
-// ---- independent brute force (no pruning, no ordering) ----------------
-function pairKey(p) { var a = p[0], b = p[1]; return a <= b ? a + ',' + b : b + ',' + a; }
-
-function rankManual(list, value, kind) {
-  list = list || [];
-  if (kind === 'rest') {
-    var k = pairKey(value);
-    for (var i = 0; i < list.length; i++) if (pairKey(list[i]) === k) return i;
-    return list.length;
-  }
-  var idx = list.indexOf(value);
-  return idx >= 0 ? idx : list.length;
-}
 
 function scoreManual(entries, pw, sw) {
   var t = 0;
   entries.forEach(function (e) {
     var p = e.person;
-    var restRank = rankManual(p.restOptions, e.restDays, 'rest');
-    var hourRank = rankManual(p.shiftOptions, e.slotIndex, 'hours');
-    if (p.priority === 'rest') t += pw * restRank + sw * hourRank;
-    else t += pw * hourRank + sw * restRank;
+    var slotPoints = weightManual(p.shiftWeights, e.slotIndex, 'hours');
+    var restPoints = weightManual(p.restWeights, e.restDays, 'rest');
+    if (p.priority === 'rest') t += pw * restPoints + sw * slotPoints;
+    else t += pw * slotPoints + sw * restPoints;
   });
   return t;
 }
@@ -134,18 +203,8 @@ function windowsOkManual(entries, cfg) {
   });
 }
 
-// A slot is "workable" for a window person when at least one rest pair keeps
-// them out of the window at that slot (the solver's slotWindowAllowed).
-function slotWorkableManual(person, slotStart, cfg) {
-  if (!person.noWorkWindow) return true;
-  for (var i = 0; i < S.ADJACENT_PAIRS.length; i++) {
-    if (S.satisfiesNoWorkWindow(person, slotStart, S.ADJACENT_PAIRS[i], cfg)) return true;
-  }
-  return false;
-}
-
-// position of each workable slot in the solver's most-disliked-by-others-first
-// order (greater sum of the OTHER people's ranks first, later letter first).
+// position of each workable slot in the solver's least-wanted-by-others-first
+// order (lower sum of the OTHER people's points first, later letter first).
 // Missing => not workable.
 function windowOrderMap(person, people, personIdx, slots, cfg) {
   var workable = [];
@@ -156,14 +215,14 @@ function windowOrderMap(person, people, personIdx, slots, cfg) {
     var sum = 0;
     for (var p = 0; p < people.length; p++) {
       if (p === personIdx) continue;
-      sum += rankManual(people[p].shiftOptions, s, 'hours');
+      sum += weightManual(people[p].shiftWeights, s, 'hours');
     }
     return sum;
   }
   workable.sort(function (a, b) {
     var da = dislike(a), db = dislike(b);
-    if (db !== da) return db - da;
-    return b - a;
+    if (da !== db) return da - db;  // lower summed points = least wanted, first
+    return b - a;                    // tie-break: later letter first
   });
   var map = {};
   workable.forEach(function (s, i) { map[s] = i; });
@@ -188,7 +247,7 @@ function bruteSolve(people, cfg) {
     if (Object.keys(orderMaps[w]).length === 0) return { ok: false, error: 'infeasible' };
   }
 
-  var bestTuple = null, best = Infinity;
+  var bestTuple = null, best = -Infinity;
   var assign = new Array(n), used = new Array(cfg.numSlots).fill(false);
   var pairs = new Array(n);
 
@@ -206,7 +265,7 @@ function bruteSolve(people, cfg) {
     var tuple = windowIdx.map(function (pi, k) { return orderMaps[k][assign[pi]]; });
     var sc = scoreManual(entries, pw, sw);
     if (bestTuple === null || lexLess(tuple, bestTuple)) { bestTuple = tuple; best = sc; }
-    else if (sameTuple(tuple, bestTuple) && sc < best) { best = sc; }
+    else if (sameTuple(tuple, bestTuple) && sc > best) { best = sc; }
   }
 
   function recRest(i) {
@@ -228,7 +287,7 @@ function bruteSolve(people, cfg) {
   }
   recSlot(0);
 
-  if (best === Infinity) return { ok: false, error: 'infeasible' };
+  if (best === -Infinity) return { ok: false, error: 'infeasible' };
   return { ok: true, score: best };
 }
 
@@ -237,26 +296,22 @@ function makeRng(seed) {
   var s = seed >>> 0;
   return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
 }
-function sample(rng, arr, n) {
-  var copy = arr.slice(), out = [];
-  while (out.length < n && copy.length) out.push(copy.splice(Math.floor(rng() * copy.length), 1)[0]);
+function makeWeights(rng, n) {
+  var out = [];
+  for (var i = 0; i < n; i++) out.push(Math.floor(rng() * 101));
   return out;
 }
 function makeCase(seed, opts) {
   var rng = makeRng(seed);
   var cfg = opts.cfg;
   var people = [];
-  var slotIdx = [];
-  for (var i = 0; i < cfg.numSlots; i++) slotIdx.push(i);
 
   for (var n = 0; n < opts.count; n++) {
     var isRest = rng() < 0.5;
-    var restOptions = sample(rng, S.ADJACENT_PAIRS, 1 + Math.floor(rng() * 2));
-    var shiftOptions = sample(rng, slotIdx, 1 + Math.floor(rng() * 2));
     people.push({
       name: 'P' + n,
-      restOptions: restOptions,
-      shiftOptions: shiftOptions,
+      shiftWeights: makeWeights(rng, cfg.numSlots),
+      restWeights: makeWeights(rng, S.ADJACENT_PAIRS.length),
       priority: isRest ? 'rest' : 'hours',
       noWorkWindow: null
     });
@@ -293,9 +348,9 @@ var cases = [
     label: 'case 6 (3 people, 3 slots, impossible minimum coverage)',
     cfg: { shiftLen: 24, stagger: 8, minCoverage: 3, numSlots: 3 },
     people: [
-      { name: 'P0', restOptions: [[4, 5]], shiftOptions: [0, 1], priority: 'hours', noWorkWindow: null },
-      { name: 'P1', restOptions: [[0, 1]], shiftOptions: [1, 2], priority: 'rest', noWorkWindow: null },
-      { name: 'P2', restOptions: [[2, 3]], shiftOptions: [0, 2], priority: 'rest', noWorkWindow: null }
+      { name: 'P0', shiftWeights: [40, 10, 0], restWeights: [5, 3, 2, 4, 1, 0, 2], priority: 'hours', noWorkWindow: null },
+      { name: 'P1', shiftWeights: [5, 30, 10], restWeights: [1, 2, 3, 4, 5, 6, 7], priority: 'rest', noWorkWindow: null },
+      { name: 'P2', shiftWeights: [10, 5, 30], restWeights: [7, 6, 5, 4, 3, 2, 1], priority: 'rest', noWorkWindow: null }
     ]
   }
 ];
@@ -323,10 +378,10 @@ console.log('\n4. Cross-run rotation: window slot outranks guarantees');
 // =====================================================================
 // Simulate the app's run sequence: empty history -> solve -> buildRunRecord
 // -> appendHistory -> computeOwed -> solve(with owed) -> ... The
-// no-work-window person's rule-determined slot (the most-disliked workable
-// slot, H) must be identical every run. A rotation guarantee that cannot
+// no-work-window person's rule-determined slot (the least-wanted workable
+// slot) must be identical every run. A rotation guarantee that cannot
 // coexist with that slot must be DROPPED (with attribution), never the slot.
-// The pin is recomputed from the current rankings each run, so history can
+// The pin is recomputed from the current weights each run, so history can
 // never move it.
 
 function findPerson(res, name) {
@@ -347,15 +402,15 @@ function runSequence(people, cfg, runs) {
 }
 
 var seq = runSequence(S.defaultPeople, config, 3);
-var daphPerson = S.defaultPeople.filter(function (p) { return p.name === 'Daphine'; })[0];
 
 seq.forEach(function (step, i) {
   var res = step.result, n = i + 1;
   check('run ' + n + ' succeeds', res.ok === true);
   if (!res.ok) return;
   var d = findPerson(res, 'Daphine');
-  check('run ' + n + ': Daphine gets slot H', d && d.slotLetter === 'H');
-  check('run ' + n + ': Daphine starts at 21:00', d && d.slotStart === 21);
+  var problem = d && ruleProblemFor(daphPerson, d, S.defaultPeople, config);
+  check('run ' + n + ': Daphine gets the least-wanted workable slot (§4)', problem === null,
+    problem || '');
   check('run ' + n + ': Daphine never on duty inside her window',
     d && S.satisfiesNoWorkWindow(daphPerson, d.slotStart, d.restDays, config) === true);
   if (i > 0) {
@@ -378,12 +433,13 @@ seq.forEach(function (step, i) {
   }
 });
 
-check('run 2 drops at least one guarantee to keep Daphine on H',
+check('run 2 drops at least one guarantee to keep Daphine on her rule slot',
   seq[1].result.guarantees && seq[1].result.guarantees.dropped.length >= 1);
-check('an identical fresh run still puts Daphine on H (history cannot move it)',
+check('an identical fresh run still puts Daphine on her rule slot (history cannot move it)',
   (function () {
     var fresh = S.solve(S.defaultPeople, config, { owed: S.computeOwed(null, S.defaultPeople).owed });
-    return findPerson(fresh, 'Daphine').slotLetter === 'H';
+    var d = findPerson(fresh, 'Daphine');
+    return ruleProblemFor(daphPerson, d, S.defaultPeople, config) === null;
   })());
 
 console.log('\n----------------------------------------');

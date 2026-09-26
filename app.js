@@ -1,11 +1,11 @@
 /* app.js
  *
  * Interface for the Shift Coverage Solver: explanation, fixed constraints and
- * editable per-person preference cards. This stage captures preferences only;
- * the solver is not run from this screen yet.
+ * editable per-person preference cards.
  *
  * State is a plain array of people in the same shape scheduler.js expects:
- *   { name, restOptions, shiftOptions, priority, noWorkWindow }
+ *   { name, shiftWeights, restWeights, priority, noWorkWindow }
+ * Each weight is 0..100; higher means more wanted.
  */
 
 (function () {
@@ -21,8 +21,8 @@
   function clonePerson(p) {
     return {
       name: p.name,
-      restOptions: p.restOptions.map(function (pair) { return pair.slice(); }),
-      shiftOptions: p.shiftOptions.slice(),
+      shiftWeights: p.shiftWeights.slice(),
+      restWeights: p.restWeights.slice(),
       priority: p.priority, // 'rest' | 'hours'
       noWorkWindow: p.noWorkWindow
         ? {
@@ -89,6 +89,13 @@
   function pairKey(pair) { return S.pairKey(pair); }
   function pairLabel(pair) { return S.DAYS[pair[0]] + '\u2013' + S.DAYS[pair[1]]; }
   function fmtHour(h) { return (h < 10 ? '0' : '') + h + ':00'; }
+
+  function clampWeight(value) {
+    var n = parseInt(value, 10);
+    if (isNaN(n) || n < 0) return 0;
+    if (n > 100) return 100;
+    return n;
+  }
 
   function el(tag, className, text) {
     var node = document.createElement(tag);
@@ -188,47 +195,62 @@
     head.appendChild(pBlock);
     card.appendChild(head);
 
-    // --- rest-day pairs dimension ---
+    // --- rest-day pairs dimension (weight 0..100 each) ---
     var restDim = el('div', 'dimension');
-    restDim.appendChild(el('h4', null, 'Acceptable rest-day pairs'));
-    var restChips = el('div', 'chips');
-    var restChipMap = {};
-    S.ADJACENT_PAIRS.forEach(function (pair) {
-      var key = pairKey(pair);
-      var chip = el('button', 'chip', pairLabel(pair));
-      chip.type = 'button';
-      chip.addEventListener('click', function () { toggleRest(view, pair); });
-      restChips.appendChild(chip);
-      restChipMap[key] = chip;
+    var restHead = el('div', 'dim-head');
+    restHead.appendChild(el('h4', null, 'Rest-day pairs (points 0\u2013100)'));
+    var restTotal = el('span', 'dim-total', '');
+    restHead.appendChild(restTotal);
+    restDim.appendChild(restHead);
+    var restInputs = [];
+    var restGrid = el('div', 'weight-grid');
+    S.ADJACENT_PAIRS.forEach(function (pair, i) {
+      var cell = el('label', 'weight-cell');
+      cell.appendChild(el('span', 'weight-name', pairLabel(pair)));
+      var input = document.createElement('input');
+      input.type = 'number';
+      input.className = 'weight-input';
+      input.min = '0';
+      input.max = '100';
+      input.step = '1';
+      input.value = String(person.restWeights[i]);
+      input.addEventListener('input', function () { setWeight(view, 'rest', i, input); });
+      input.addEventListener('blur', function () { snapWeight(input); });
+      cell.appendChild(input);
+      restGrid.appendChild(cell);
+      restInputs.push(input);
     });
-    restDim.appendChild(restChips);
-    var restRankWrap = el('div', 'rank-wrap');
-    restRankWrap.appendChild(el('span', 'rank-caption', 'Rank (drag):'));
-    var restRank = el('ol', 'rank-list');
-    restRankWrap.appendChild(restRank);
-    restDim.appendChild(restRankWrap);
+    restDim.appendChild(restGrid);
     card.appendChild(restDim);
 
     // --- shift slots dimension ---
     var hourDim = el('div', 'dimension');
-    hourDim.appendChild(el('h4', null, 'Acceptable shift slots'));
-    var hourChips = el('div', 'chips');
-    var hourChipMap = {};
-    for (var i = 0; i < config.numSlots; i++) {
+    var hourHead = el('div', 'dim-head');
+    hourHead.appendChild(el('h4', null, 'Shift slots (points 0\u2013100)'));
+    var hourTotal = el('span', 'dim-total', '');
+    hourHead.appendChild(hourTotal);
+    hourDim.appendChild(hourHead);
+    var hourInputs = [];
+    var hourGrid = el('div', 'weight-grid');
+    for (var si = 0; si < config.numSlots; si++) {
       (function (idx) {
-        var chip = el('button', 'chip', '');
-        chip.type = 'button';
-        chip.addEventListener('click', function () { toggleHour(view, idx); });
-        hourChips.appendChild(chip);
-        hourChipMap[idx] = chip;
-      })(i);
+        var cell = el('label', 'weight-cell');
+        cell.appendChild(el('span', 'weight-name', slotLabel(idx)));
+        var input = document.createElement('input');
+        input.type = 'number';
+        input.className = 'weight-input';
+        input.min = '0';
+        input.max = '100';
+        input.step = '1';
+        input.value = String(person.shiftWeights[idx]);
+        input.addEventListener('input', function () { setWeight(view, 'hours', idx, input); });
+        input.addEventListener('blur', function () { snapWeight(input); });
+        cell.appendChild(input);
+        hourGrid.appendChild(cell);
+        hourInputs.push(input);
+      })(si);
     }
-    hourDim.appendChild(hourChips);
-    var hourRankWrap = el('div', 'rank-wrap');
-    hourRankWrap.appendChild(el('span', 'rank-caption', 'Rank (drag):'));
-    var hourRank = el('ol', 'rank-list');
-    hourRankWrap.appendChild(hourRank);
-    hourDim.appendChild(hourRankWrap);
+    hourDim.appendChild(hourGrid);
     card.appendChild(hourDim);
 
     // --- advanced (collapsed) ---
@@ -292,78 +314,38 @@
     view.nameInput = nameInput;
     view.restBtn = restBtn;
     view.hoursBtn = hoursBtn;
-    view.restChips = restChipMap;
-    view.hourChips = hourChipMap;
-    view.restRank = restRank;
-    view.hourRank = hourRank;
+    view.restInputs = restInputs;
+    view.hourInputs = hourInputs;
+    view.restTotal = restTotal;
+    view.hourTotal = hourTotal;
     view.winEnabled = winEnabled;
     view.winFields = winFields;
     view.startDaySel = startDaySel;
     view.startHourSel = startHourSel;
     view.endDaySel = endDaySel;
     view.endHourSel = endHourSel;
-    view.restSortable = null;
-    view.hourSortable = null;
     return view;
   }
 
-  function toggleRest(view, pair) {
-    var p = state[view.index];
-    var key = pairKey(pair);
-    var at = -1;
-    for (var i = 0; i < p.restOptions.length; i++) if (pairKey(p.restOptions[i]) === key) at = i;
-    if (at >= 0) p.restOptions.splice(at, 1);
-    else p.restOptions.push(pair.slice());
-    updatePerson(view);
+  function setWeight(view, kind, index, input) {
+    var raw = input.value;
+    var v = clampWeight(raw);
+    var arr = kind === 'rest' ? state[view.index].restWeights : state[view.index].shiftWeights;
+    arr[index] = v;
+    if (raw !== '' && String(v) !== raw) input.value = String(v);
+    updateTotals(view);
   }
 
-  function toggleHour(view, idx) {
-    var p = state[view.index];
-    var at = p.shiftOptions.indexOf(idx);
-    if (at >= 0) p.shiftOptions.splice(at, 1);
-    else p.shiftOptions.push(idx);
-    updatePerson(view);
+  function snapWeight(input) {
+    if (input.value === '') input.value = '0';
   }
 
-  function commitRankOrder(view, dim) {
+  function updateTotals(view) {
     var p = state[view.index];
-    var ol = dim === 'rest' ? view.restRank : view.hourRank;
-    var keys = Array.prototype.slice.call(ol.children).map(function (li) {
-      return li.getAttribute('data-key');
-    });
-    if (dim === 'rest') {
-      var byKey = {};
-      S.ADJACENT_PAIRS.forEach(function (pr) { byKey[pairKey(pr)] = pr; });
-      p.restOptions = keys.map(function (k) { return byKey[k].slice(); });
-    } else {
-      p.shiftOptions = keys.map(function (k) { return parseInt(k, 10); });
-    }
-    Array.prototype.slice.call(ol.children).forEach(function (li, i) {
-      li.querySelector('.rank-num').textContent = String(i + 1);
-    });
-  }
-
-  function refreshRank(view, dim) {
-    var p = state[view.index];
-    var ol = dim === 'rest' ? view.restRank : view.hourRank;
-    var list = dim === 'rest' ? p.restOptions : p.shiftOptions;
-
-    var key = dim === 'rest' ? 'restSortable' : 'hourSortable';
-    if (view[key]) { view[key].destroy(); view[key] = null; }
-    ol.innerHTML = '';
-    list.forEach(function (v, i) {
-      var li = el('li', 'rank-item');
-      li.setAttribute('data-key', dim === 'rest' ? pairKey(v) : String(v));
-      li.appendChild(el('span', 'rank-num', String(i + 1)));
-      li.appendChild(el('span', null, dim === 'rest' ? pairLabel(v) : slotLabel(v)));
-      ol.appendChild(li);
-    });
-    if (window.Sortable) {
-      view[key] = window.Sortable.create(ol, {
-        animation: 0,
-        onEnd: function () { commitRankOrder(view, dim); }
-      });
-    }
+    var restSum = p.restWeights.reduce(function (a, b) { return a + b; }, 0);
+    var hourSum = p.shiftWeights.reduce(function (a, b) { return a + b; }, 0);
+    view.restTotal.textContent = 'Total ' + restSum + ' / 100';
+    view.hourTotal.textContent = 'Total ' + hourSum + ' / 100';
   }
 
   function updatePerson(view) {
@@ -372,20 +354,13 @@
     swapClass(view.restBtn, 'active', p.priority === 'rest');
     swapClass(view.hoursBtn, 'active', p.priority === 'hours');
 
-    S.ADJACENT_PAIRS.forEach(function (pair) {
-      var key = pairKey(pair);
-      var has = p.restOptions.some(function (r) { return pairKey(r) === key; });
-      swapClass(view.restChips[key], 'selected', has);
-    });
-
     for (var i = 0; i < config.numSlots; i++) {
-      var chip = view.hourChips[i];
-      chip.textContent = slotLabel(i);
-      swapClass(chip, 'selected', p.shiftOptions.indexOf(i) >= 0);
+      view.hourInputs[i].value = String(p.shiftWeights[i]);
     }
-
-    refreshRank(view, 'rest');
-    refreshRank(view, 'hour');
+    for (var r = 0; r < S.ADJACENT_PAIRS.length; r++) {
+      view.restInputs[r].value = String(p.restWeights[r]);
+    }
+    updateTotals(view);
 
     view.winEnabled.checked = !!p.noWorkWindow;
     view.winFields.style.display = p.noWorkWindow ? 'flex' : 'none';
@@ -433,14 +408,14 @@
       if (!o) continue;
       if (o.slot != null) {
         lines.push({
-          text: p.name + ' is guaranteed their #1 shift slot (' + S.SLOT_LETTERS[o.slot] +
+          text: p.name + ' is guaranteed their top-pick shift slot (' + S.SLOT_LETTERS[o.slot] +
             ') this run \u2014 ' + missPhrase(o.slotStreak, 'slot'),
           kind: 'slot'
         });
       }
       if (o.pair != null) {
         lines.push({
-          text: p.name + ' is guaranteed their #1 rest-day pair (' + pairLabel(o.pair) +
+          text: p.name + ' is guaranteed their top-pick rest-day pair (' + pairLabel(o.pair) +
             ') this run \u2014 ' + missPhrase(o.pairStreak, 'rest'),
           kind: 'rest'
         });
@@ -656,7 +631,7 @@
       }).then(function (result) {
         logLine('Search finished in ' + result.elapsedMs + ' ms (' + snapshots + ' progress updates).');
         if (result.ok) {
-          logLine('Best penalty score ' + result.score + '. Coverage ' +
+          logLine('Best weight score ' + result.score + '. Coverage ' +
             result.minCoverage + ' to ' + result.maxCoverage + '.');
           logLine('Checked ' + result.stats.innerPerms + ' slot arrangements and ' +
             result.stats.innerChecked + ' coverage checks across ' + result.stats.outers +
@@ -706,6 +681,13 @@
     return null;
   }
 
+  function personByName(people, name) {
+    for (var i = 0; i < people.length; i++) {
+      if (people[i].name === name) return people[i];
+    }
+    return null;
+  }
+
   function coverageColor(count, min) {
     if (count < min) return { bg: '#c0392b', fg: '#ffffff' };
     if (count === min) return { bg: '#e8f2ea', fg: '#1a1a1a' };
@@ -749,7 +731,7 @@
     }).filter(function (g) { return g.length > 1; });
     inter.forEach(function (g) {
       box.appendChild(el('p', null,
-        g.join(' and ') + ' listed identical preferences, so either could have been the one to miss out.'));
+        g.join(' and ') + ' entered identical preferences, so either could have been the one to miss out.'));
     });
 
     box.appendChild(el('p', null,
@@ -781,13 +763,14 @@
           else if (v > result.minCoverage) above++;
         });
       });
-      var met = result.assignment.filter(function (a) { return a.priorityMet; }).length;
+      var prioritySum = result.assignment.reduce(function (s, a) { return s + a.priorityPoints; }, 0);
+      var maxPriority = result.assignment.length * 100;
       tiles.push({ label: 'Minimum coverage', value: String(result.minCoverage) });
       tiles.push({ label: 'Maximum coverage', value: String(result.maxCoverage) });
       tiles.push({ label: 'Hours at minimum', value: String(atMin) });
       tiles.push({ label: 'Hours above minimum', value: String(above) });
       tiles.push({ label: 'Total scheduled hours', value: String(result.totalPersonHours) });
-      tiles.push({ label: 'Priority requirements met', value: met + ' / ' + result.assignment.length });
+      tiles.push({ label: 'Priority weight points', value: prioritySum + ' / ' + maxPriority });
       tiles.push({ label: 'Outer arrangements', value: String(result.stats.outers) });
       tiles.push({ label: 'Coverage checks', value: String(result.stats.innerChecked) });
       tiles.push({ label: 'Solve time', value: result.elapsedMs + ' ms' });
@@ -808,7 +791,6 @@
 
     result.assignment.forEach(function (a) {
       var tr = document.createElement('tr');
-      if (!a.priorityMet) tr.className = 'row-missed';
 
       tr.appendChild(el('td', null, a.name));
       tr.appendChild(el('td', null, a.slotLetter + ' ' + fmtHour(a.slotStart)));
@@ -816,12 +798,8 @@
       tr.appendChild(el('td', null, fmtHour(a.slotStart) + '\u2013' + fmtHour(end)));
       tr.appendChild(el('td', null, a.restDayNames.join('\u2013')));
       tr.appendChild(el('td', null, a.priority === 'rest' ? 'Rest days' : 'Work hours'));
-      tr.appendChild(el('td', null, a.priorityMet ? '#' + (a.priorityRank + 1) : 'not on list'));
-      tr.appendChild(el('td', null, '#' + (a.softRank + 1)));
-
-      var status = el('td');
-      status.appendChild(el('span', a.priorityMet ? 'met' : 'missed', a.priorityMet ? 'met' : 'missed'));
-      tr.appendChild(status);
+      tr.appendChild(el('td', 'points', String(a.priorityPoints)));
+      tr.appendChild(el('td', 'points', String(a.softPoints)));
 
       tbody.appendChild(tr);
     });
@@ -921,7 +899,7 @@
         return g.filter(function (n) { return t.swingNames.indexOf(n) >= 0; });
       }).filter(function (g) { return g.length > 1; });
       tInter.forEach(function (g) {
-        tieText += ' ' + g.join(' and ') + ' listed identical preferences, so either could have been the one to miss out.';
+        tieText += ' ' + g.join(' and ') + ' entered identical preferences, so either could have been the one to miss out.';
       });
       if (t.swingNames.length) {
         tieText += ' The assignment changed between the tied schedules for: ' + t.swingNames.join(', ') + '.';
@@ -944,14 +922,21 @@
       });
     });
 
-    var met = result.assignment.filter(function (a) { return a.priorityMet; }).length;
-    var unmet = result.assignment.filter(function (a) { return !a.priorityMet; });
+    var prioritySum = 0, softSum = 0, maxPriority = 0;
+    result.assignment.forEach(function (a) {
+      prioritySum += a.priorityPoints;
+      softSum += a.softPoints;
+      var ap = personByName(people, a.name);
+      if (ap) {
+        var arr = a.priority === 'rest' ? ap.restWeights : ap.shiftWeights;
+        maxPriority += arr.reduce(function (m, v) { return v > m ? v : m; }, 0);
+      }
+    });
     out.push({
-      h: 'Priority requirements',
-      text: [met + ' of ' + result.assignment.length +
-        ' people received an option from their priority list. ' +
-        (unmet.length ? 'Not satisfied: ' + unmet.map(function (a) { return a.name; }).join(', ') + '.'
-                      : 'All were satisfied.')]
+      h: 'Priority weights',
+      text: ['The team was awarded ' + prioritySum + ' of a possible ' + maxPriority +
+        ' points on their priority dimension, and ' + softSum +
+        ' points on their secondary dimension. The solver maximises the total, so a person can fall short only when a hard limit (coverage minimum, a no-work window, or a carried-over guarantee) blocks the higher-weighted choice.']
     });
 
     if (result.guarantees && result.guarantees.owed.length > 0) {
@@ -961,8 +946,8 @@
         var what = item.dimension === 'slot'
           ? 'slot ' + S.SLOT_LETTERS[item.value]
           : 'rest days ' + pairLabel(item.value);
-        gText.push(item.name + ' got ' + what + ' because they missed their #1 ' +
-          (item.dimension === 'slot' ? 'slot' : 'rest-day pair') +
+        gText.push(item.name + ' got ' + what + ' because they missed their top-pick ' +
+          (item.dimension === 'slot' ? 'shift slot' : 'rest-day pair') +
           ' last run and it was guaranteed this run.');
       });
       g.dropped.forEach(function (item) {
@@ -980,31 +965,20 @@
 
     result.assignment.forEach(function (a) {
       var dim = a.priority === 'rest' ? 'rest-day pair' : 'shift slot';
-      if (a.priorityMet && a.priorityRank > 0) {
-        out.push({
-          h: a.name + ' \u2014 priority choice #' + (a.priorityRank + 1),
-          text: [a.name + ' received priority choice #' + (a.priorityRank + 1) + ' for their ' + dim +
-            ', not their first pick, because a higher pick was already taken or would have broken the coverage minimum.']
-        });
-      } else if (!a.priorityMet) {
-        out.push({
-          h: a.name + ' \u2014 priority not met',
-          text: [a.name + ' could not be given any listed ' + dim +
-            '. The closest remaining option was assigned so the hard coverage minimum could still hold.']
-        });
-      }
-    });
-
-    result.assignment.forEach(function (a) {
-      if (a.softRank > 0) {
-        var dim = a.priority === 'rest' ? 'shift slot' : 'rest-day pair';
-        out.push({
-          h: a.name + ' \u2014 secondary preference',
-          text: ['Because ' + a.name + ' marked ' + (a.priority === 'rest' ? 'rest days' : 'work hours') +
-            ' as their priority, their ' + dim + ' is only a preference and was allowed to move to choice #' +
-            (a.softRank + 1) + '.']
-        });
-      }
+      var other = a.priority === 'rest' ? 'shift slot' : 'rest-day pair';
+      var ap = personByName(people, a.name);
+      var arr = ap ? (a.priority === 'rest' ? ap.restWeights : ap.shiftWeights) : [];
+      var best = arr.reduce(function (m, v) { return v > m ? v : m; }, 0);
+      var full = a.priorityPoints >= best;
+      var text = a.name + ' received ' + a.priorityPoints + ' weight points for their ' + dim +
+        ' (their priority) and ' + a.softPoints + ' points for their ' + other + '. ' +
+        (full
+          ? 'That is the highest weight they gave any ' + dim + '.'
+          : 'A higher-weighted ' + dim + ' was already taken or would have broken the hard coverage minimum, so the best remaining option was used.');
+      out.push({
+        h: a.name + ' \u2014 ' + a.priorityPoints + ' priority points',
+        text: [text]
+      });
     });
 
     return out;

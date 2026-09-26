@@ -202,13 +202,47 @@ function main(result) {
   assert(shiftProblems.length === 0, 'all shifts are 9 clean consecutive hours',
     shiftProblems.join('; '));
 
+  // 4b. Weighted points are present, in range and consistent ------------
+  section('4b. Weighted points (0..100) and priority/soft consistency');
+  var byName = {};
+  defaultPeople.forEach(function (p) { byName[p.name] = p; });
+  var pointProblems = [];
+  assignment.forEach(function (a) {
+    var p = byName[a.name];
+    if (!p) { pointProblems.push(a.name + ': not in dataset'); return; }
+    ['slotPoints', 'restPoints', 'priorityPoints', 'softPoints'].forEach(function (f) {
+      var v = a[f];
+      if (typeof v !== 'number' || !isFinite(v) || v < 0 || v > 100) {
+        pointProblems.push(a.name + ': ' + f + ' = ' + v + ' out of range');
+      }
+    });
+    var expectedSlot = Scheduler.weightOf(p.shiftWeights, a.slotIndex, 'hours');
+    var expectedRest = Scheduler.weightOf(p.restWeights, a.restDays, 'rest');
+    if (a.slotPoints !== expectedSlot) {
+      pointProblems.push(a.name + ': slotPoints ' + a.slotPoints + ' != ' + expectedSlot);
+    }
+    if (a.restPoints !== expectedRest) {
+      pointProblems.push(a.name + ': restPoints ' + a.restPoints + ' != ' + expectedRest);
+    }
+    var expectedPriority = p.priority === 'rest' ? expectedRest : expectedSlot;
+    var expectedSoft = p.priority === 'rest' ? expectedSlot : expectedRest;
+    if (a.priorityPoints !== expectedPriority) {
+      pointProblems.push(a.name + ': priorityPoints ' + a.priorityPoints + ' != ' + expectedPriority);
+    }
+    if (a.softPoints !== expectedSoft) {
+      pointProblems.push(a.name + ': softPoints ' + a.softPoints + ' != ' + expectedSoft);
+    }
+  });
+  assert(pointProblems.length === 0, 'every entry\'s points are in 0..100 and match the person\'s weights',
+    pointProblems.join('; '));
+
   // 5. No-work-window rule (the slot the rest of the team least wants) ---
   section('5. No-work-window rule (the slot the rest of the team least wants)');
   console.log('      Condition used: the assigned slot must be workable, no workable');
-  console.log('      slot may have a strictly greater dislike (sum of the OTHER');
-  console.log('      people\'s ranks for that slot), and no workable slot tied on that');
-  console.log('      dislike may have a later letter (tie-break: later letter first).');
-  console.log('      A strictly-more-disliked workable slot that could not be covered');
+  console.log('      slot may have a strictly lower summed weight (sum of the OTHER');
+  console.log('      people\'s points for that slot), and no workable slot tied on that');
+  console.log('      sum may have a later letter (tie-break: later letter first).');
+  console.log('      A strictly-less-wanted workable slot that could not be covered');
   console.log('      is allowed to be skipped.');
   var windowPeople = defaultPeople.filter(function (p) { return p.noWorkWindow; });
   var windowProblems = [];
@@ -223,13 +257,14 @@ function main(result) {
     if (!respected) windowProblems.push(person.name + ': satisfiesNoWorkWindow false');
     if (overlap.length > 0) windowProblems.push(person.name + ': ' + overlap.length + ' duty hours inside window');
 
-    // (b) assigned slot is the most-disliked-by-others workable slot.
-    // dislike(s) = sum over every OTHER person of their rank of slot s.
-    function dislike(s) {
+    // (b) assigned slot is the least-wanted-by-others workable slot.
+    // summedWeight(s) = sum over every OTHER person of their points for slot s;
+    // a LOWER sum means the rest of the team wants it less.
+    function summedWeight(s) {
       var sum = 0;
       defaultPeople.forEach(function (p) {
         if (p.name === person.name) return;
-        sum += Scheduler.rankOf(p.shiftOptions, s, 'hours');
+        sum += Scheduler.weightOf(p.shiftWeights, s, 'hours');
       });
       return sum;
     }
@@ -242,27 +277,27 @@ function main(result) {
     var assignedWorkable = workable.indexOf(entry.slotIndex) >= 0;
     if (!assignedWorkable) windowProblems.push(person.name + ': assigned slot not workable');
 
-    var assignedDislike = dislike(entry.slotIndex);
-    var moreDisliked = workable.filter(function (s) { return dislike(s) > assignedDislike; });
+    var assignedWeight = summedWeight(entry.slotIndex);
+    var lessWanted = workable.filter(function (s) { return summedWeight(s) < assignedWeight; });
     var laterEqual = workable.filter(function (s) {
-      return s > entry.slotIndex && dislike(s) === assignedDislike;
+      return s > entry.slotIndex && summedWeight(s) === assignedWeight;
     });
 
-    if (moreDisliked.length > 0) {
+    if (lessWanted.length > 0) {
       windowProblems.push(person.name + ': assigned ' + entry.slotLetter +
-        ' has dislike ' + assignedDislike + ' but workable ' +
-        moreDisliked.map(function (s) { return Scheduler.SLOT_LETTERS[s]; }).join(',') +
-        ' are more disliked');
+        ' has summed weight ' + assignedWeight + ' but workable ' +
+        lessWanted.map(function (s) { return Scheduler.SLOT_LETTERS[s]; }).join(',') +
+        ' are less wanted');
     } else if (laterEqual.length > 0) {
       windowProblems.push(person.name + ': assigned ' + entry.slotLetter +
         ' is beaten in the tie-break by later ' +
         laterEqual.map(function (s) { return Scheduler.SLOT_LETTERS[s]; }).join(','));
     } else {
       console.log('      ' + person.name + ': assigned ' + entry.slotLetter +
-        ' (dislike ' + assignedDislike + ') is the most-disliked workable slot.');
+        ' (summed weight ' + assignedWeight + ') is the least-wanted workable slot.');
     }
   });
-  assert(windowProblems.length === 0, 'all no-work-window people got the most-disliked workable slot',
+  assert(windowProblems.length === 0, 'all no-work-window people got the least-wanted workable slot',
     windowProblems.join('; '));
 
   // 6. Reproducibility --------------------------------------------------
@@ -298,7 +333,7 @@ function main(result) {
       '  start ' + pad2(a.slotStart + ':00') +
       '  rest ' + a.restDayNames.join('-') +
       '  priority=' + a.priority +
-      ' (rank ' + a.priorityRank + ', met=' + a.priorityMet + ')');
+      ' (priority points ' + a.priorityPoints + ', soft points ' + a.softPoints + ')');
   });
   console.log('  score=' + result.score +
     '  minCoverage=' + result.minCoverage +

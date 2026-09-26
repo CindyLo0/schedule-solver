@@ -104,12 +104,15 @@ function scheduleKey(assignment) {
   // — it must exhaust a large space before concluding "infeasible".
   var longPeople = [];
   for (var i = 0; i < 8; i++) {
+    var longShiftW = [];
+    for (var s = 0; s < 8; s++) longShiftW.push(s === i ? 100 : 1);
+    var longRestW = [];
+    for (var r = 0; r < S.ADJACENT_PAIRS.length; r++) longRestW.push(50);
     longPeople.push({
       name: 'P' + i,
-      restOptions: [[4, 5]],
-      shiftOptions: [i],
+      shiftWeights: longShiftW,
+      restWeights: longRestW,
       priority: 'hours',
-      exactStart: null,
       noWorkWindow: null
     });
   }

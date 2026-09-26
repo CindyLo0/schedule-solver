@@ -24,8 +24,9 @@
   var HOURS_PER_WEEK = HOURS_PER_DAY * DAYS_PER_WEEK; // 168
 
   // Relative weights for the scoring rule. A person's priority dimension is
-  // weighted heavily, their non-priority dimension lightly. Ranks count up
-  // from 0 (best), so LOWER total scores are BETTER.
+  // weighted heavily, their non-priority dimension lightly. These multiply
+  // the POINTS (0..100, higher = more wanted) from weighted.txt, so HIGHER
+  // total reward is BETTER.
   var PRIORITY_WEIGHT = 100;
   var SOFT_WEIGHT = 1;
 
@@ -67,71 +68,68 @@
   // noWorkWindow: optional { startDay, startHour, endDay, endHour }; the
   //   person may never be on duty inside that window (checked against their
   //   actual shift hours, overnight spans included).
-  // Full personal rankings supplied by the team (rankings.txt), highest
-  // preference first. Slot letters: A=0 ... H=7. Rest pairs are the seven
-  // consecutive day pairs, Mon-Tue=[0,1] ... Sun-Mon=[6,0].
+  //
+  // shiftWeights: 8 values, index = slot index (A=0 ... H=7). Transcribed
+  //   from weighted.txt START TIME. Each value is 0..100 points, and a
+  //   HIGHER value means the slot is MORE wanted.
+  // restWeights: 7 values, aligned to ADJACENT_PAIRS
+  //   [[0,1],[1,2],[2,3],[3,4],[4,5],[5,6],[6,0]] = Mon-Tue ... Sun-Mon.
+  //   Transcribed from weighted.txt REST DAY. Same 0..100, higher = more
+  //   wanted.
   var defaultPeople = [
     {
       name: 'Cindy',
-      // Sun-Mon, Mon-Tue, Fri-Sat, Sat-Sun, Tue-Wed, Wed-Thu
-      restOptions: [[6, 0], [0, 1], [4, 5], [5, 6], [1, 2], [2, 3]],
-      shiftOptions: [5, 4, 3, 2, 1, 6, 0, 7], // F, E, D, C, B, G, A, H
+      shiftWeights: [9, 5, 12, 15, 20, 32, 7, 0],
+      restWeights: [30, 7, 4, 22, 9, 12, 16],
       priority: 'hours',
       noWorkWindow: null
     },
     {
       name: 'Inah',
-      // Fri-Sat, Sun-Mon, Sat-Sun, Thu-Fri, Tue-Wed
-      restOptions: [[4, 5], [6, 0], [5, 6], [3, 4], [1, 2]],
-      shiftOptions: [4, 3, 5, 2, 6, 1, 7, 0], // E, D, F, C, G, B, H, A
+      shiftWeights: [0, 3, 7, 35, 40, 10, 4, 1],
+      restWeights: [5, 5, 5, 5, 30, 20, 30],
       priority: 'hours',
       noWorkWindow: null
     },
     {
       name: 'Daphine',
-      // Fri-Sat, Sat-Sun, Sun-Mon, Thu-Fri, Tue-Wed
-      restOptions: [[4, 5], [5, 6], [6, 0], [3, 4], [1, 2]],
-      shiftOptions: [6, 5, 4, 3, 2, 7, 0, 1], // G, F, E, D, C, H, A, B
+      shiftWeights: [3, 0, 5, 10, 25, 20, 30, 7],
+      restWeights: [7, 5, 3, 25, 35, 15, 10],
       priority: 'rest',
       noWorkWindow: { startDay: 4, startHour: 18, endDay: 5, endHour: 18 }
     },
     {
       name: 'Bing',
-      // Sat-Sun, Fri-Sat, Sun-Mon, Tue-Wed, Thu-Fri
-      restOptions: [[5, 6], [4, 5], [6, 0], [1, 2], [3, 4]],
-      shiftOptions: [0, 3, 1, 2, 4, 7, 5, 6], // A, D, B, C, E, H, F, G
+      shiftWeights: [40, 15, 25, 10, 2, 1, 0, 7],
+      restWeights: [1, 3, 2, 4, 30, 40, 20],
       priority: 'hours',
       noWorkWindow: null
     },
     {
       name: 'Phoebe',
-      // Sat-Sun, Sun-Mon, Fri-Sat, Thu-Fri, Tue-Wed
-      restOptions: [[5, 6], [6, 0], [4, 5], [3, 4], [1, 2]],
-      shiftOptions: [2, 3, 1, 4, 5, 0, 6, 7], // C, D, B, E, F, A, G, H
+      shiftWeights: [5, 10, 40, 30, 10, 3, 2, 0],
+      restWeights: [5, 5, 5, 5, 20, 40, 20],
       priority: 'rest',
       noWorkWindow: null
     },
     {
       name: 'Joan',
-      // Sat-Sun, Sun-Mon, Fri-Sat, Thu-Fri, Tue-Wed
-      restOptions: [[5, 6], [6, 0], [4, 5], [3, 4], [1, 2]],
-      shiftOptions: [2, 1, 3, 4, 0, 5, 6, 7], // C, B, D, E, A, F, G, H
+      shiftWeights: [10, 25, 40, 15, 4, 3, 2, 1],
+      restWeights: [1, 3, 2, 4, 20, 40, 30],
       priority: 'hours',
       noWorkWindow: null
     },
     {
       name: 'LA',
-      // Sat-Sun, Fri-Sat, Thu-Fri, Sun-Mon, Tue-Wed
-      restOptions: [[5, 6], [4, 5], [3, 4], [6, 0], [1, 2]],
-      shiftOptions: [1, 2, 3, 4, 0, 5, 6, 7], // B, C, D, E, A, F, G, H
+      shiftWeights: [5, 35, 25, 20, 10, 3, 2, 0],
+      restWeights: [10, 5, 5, 10, 20, 30, 20],
       priority: 'hours',
       noWorkWindow: null
     },
     {
       name: 'Sherie',
-      // Sun-Mon, Sat-Sun, Fri-Sat, Thu-Fri, Tue-Wed
-      restOptions: [[6, 0], [5, 6], [4, 5], [3, 4], [1, 2]],
-      shiftOptions: [3, 2, 4, 5, 6, 7, 0, 1], // D, C, E, F, G, H, A, B
+      shiftWeights: [3, 0, 35, 30, 15, 7, 6, 4],
+      restWeights: [0, 5, 3, 8, 9, 35, 40],
       priority: 'rest',
       noWorkWindow: null
     }
@@ -152,6 +150,18 @@
     var a = pair[0];
     var b = pair[1];
     return a <= b ? a + ',' + b : b + ',' + a;
+  }
+
+  // Index of the largest value in a weights array. Returns -1 when no value
+  // is strictly positive, i.e. the person has no "top pick" in that
+  // dimension (rotation treats that dimension as untracked).
+  function topOptionIndex(weights) {
+    weights = weights || [];
+    var wi = -1, best = 0;
+    for (var i = 0; i < weights.length; i++) {
+      if (weights[i] > best) { best = weights[i]; wi = i; }
+    }
+    return wi;
   }
 
   // ---------------------------------------------------------------------
@@ -275,25 +285,29 @@
   // Scoring
   // ---------------------------------------------------------------------
 
-  // Rank of a value within a person's own ranked option list: 0 is their
-  // top choice. A value not in the list gets rank = list.length (one worse
-  // than the last listed option), so unsatisfiable lists still compare.
-  function rankOf(options, value, kind) {
-    options = options || [];
+  // Points for a value from a person's weights array. For kind 'hours',
+  // `value` is a slot index. For kind 'rest', `value` is a day pair and its
+  // index is resolved via pairKey against ADJACENT_PAIRS. Returns 0 when the
+  // value is not found (or has no points), so every value still compares.
+  function weightOf(weightsArray, value, kind) {
+    weightsArray = weightsArray || [];
     if (kind === 'rest') {
       var key = pairKey(value);
-      for (var i = 0; i < options.length; i++) {
-        if (pairKey(options[i]) === key) return i;
+      for (var i = 0; i < ADJACENT_PAIRS.length; i++) {
+        if (pairKey(ADJACENT_PAIRS[i]) === key) {
+          var rv = weightsArray[i];
+          return typeof rv === 'number' ? rv : 0;
+        }
       }
-      return options.length;
+      return 0;
     }
-    var idx = options.indexOf(value);
-    return idx >= 0 ? idx : options.length;
+    var v = weightsArray[value];
+    return typeof v === 'number' ? v : 0;
   }
 
-  // Score = sum over people of PRIORITY_WEIGHT * priorityRank
-  //                                  + SOFT_WEIGHT * nonPriorityRank.
-  // Lower is better. `assignment` is the same shape as buildCoverageGrid,
+  // Reward = sum over people of PRIORITY_WEIGHT * pointsOnPriorityDimension
+  //                                  + SOFT_WEIGHT * pointsOnOtherDimension.
+  // Higher is better. `assignment` is the same shape as buildCoverageGrid,
   // and each entry must carry its `person`.
   function scoreAssignment(assignment, cfg, opts) {
     cfg = cfg || config;
@@ -307,14 +321,13 @@
       var entry = entries[i];
       var p = entry.person;
       if (!p) throw new Error('scoreAssignment needs entry.person for each entry');
-      var slotStart = entrySlotStart(entry, assignment, cfg);
-      var restRank = rankOf(p.restOptions, entry.restDays, 'rest');
-      var hourRank = rankOf(p.shiftOptions, entry.slotIndex, 'hours');
+      var slotPoints = weightOf(p.shiftWeights, entry.slotIndex, 'hours');
+      var restPoints = weightOf(p.restWeights, entry.restDays, 'rest');
 
       if (p.priority === 'rest') {
-        total += pw * restRank + sw * hourRank;
+        total += pw * restPoints + sw * slotPoints;
       } else {
-        total += pw * hourRank + sw * restRank;
+        total += pw * slotPoints + sw * restPoints;
       }
     }
     return total;
@@ -325,32 +338,19 @@
   // ---------------------------------------------------------------------
   //
   // The candidate domain is OPEN: every person may be assigned any of the 8
-  // slots and any of the 7 consecutive rest-day pairs. Their ranked lists only
-  // say how much they want each option (rank 0 = most wanted; anything they
-  // did not rank is a tied-for-last tier). The two dimensions are independent,
-  // linked only by feasibility.
+  // slots and any of the 7 consecutive rest-day pairs. Their weight arrays
+  // only say how much they want each option (0..100 points, higher = more
+  // wanted; anything with no points is simply worth nothing). The two
+  // dimensions are independent, linked only by feasibility.
   //
   // Hard rules: coverage minimum on all 168 hours; each person's no-work
   // window; any owed "guarantee" carried over from the previous run (rotation
   // fairness).
   //
-  // Soft objective: weighted rank penalty (lower is better). A person's
-  // priority dimension counts heavily, the other lightly.
+  // Objective: weighted reward (HIGHER is better). A person's priority
+  // dimension counts heavily, the other lightly.
 
   var ADJACENT_PAIRS = [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [5, 6], [6, 0]];
-
-  function hourRankFor(person, slotIndex, cfg) {
-    return rankOf(person.shiftOptions, slotIndex, 'hours');
-  }
-
-  function restRankFor(person, pair) {
-    return rankOf(person.restOptions, pair, 'rest');
-  }
-
-  function listLengthFor(person, kind) {
-    var list = kind === 'rest' ? person.restOptions : person.shiftOptions;
-    return (list || []).length;
-  }
 
   // The dimension a person marked as their priority is weighted heavily.
   function slotWeightFor(person, pw, sw) {
@@ -371,7 +371,8 @@
   }
 
   // Rest pairs a person may take at a slot: window-safe, and (if a guarantee
-  // is owed) exactly the guaranteed pair. Sorted most-wanted first.
+  // is owed) exactly the guaranteed pair. Sorted most-wanted (highest points)
+  // first.
   function restOptionsFor(person, slotStart, cfg, forcedPair) {
     var list = [];
     for (var i = 0; i < ADJACENT_PAIRS.length; i++) {
@@ -380,11 +381,11 @@
       if (!satisfiesNoWorkWindow(person, slotStart, pair, cfg)) continue;
       list.push({
         pair: pair,
-        rank: restRankFor(person, pair),
+        points: weightOf(person.restWeights, pair, 'rest'),
         hours: shiftedHoursOnDays(slotStart, pair, cfg)
       });
     }
-    list.sort(function (a, b) { return a.rank - b.rank; });
+    list.sort(function (a, b) { return b.points - a.points; });
     return list;
   }
 
@@ -419,15 +420,16 @@
 
   // Slot assignment is enumerated directly inside the search (see attemptGen).
 
-  // --- ordered walk of the hour-priority rest-day space -------------------
-  // Each person's 7 pairs are visited in ascending rest rank ("bonus" order),
-  // and the space is searched depth-first with branch-and-bound on that bonus,
-  // so the best-bonus feasible combination is found first and the full 7^k
-  // space is only exhausted when nothing is feasible. Feasibility is checked
-  // against a per-hour "capacity" (how many rest shifts that hour can absorb
-  // before coverage drops below the minimum), which prunes whole subtrees the
-  // instant a rest shift would over-fill an hour. Exact: the B&B bound is the
-  // sum of the cheapest remaining ranks, so no better combination is skipped.
+  // --- ordered walk of the rest-day space ---------------------------------
+  // Each person's 7 pairs are visited in descending points ("most wanted"
+  // order), and the space is searched depth-first with branch-and-bound on
+  // that reward, so the best-reward feasible combination is found first and
+  // the full 7^k space is only exhausted when nothing is feasible. Feasibility
+  // is checked against a per-hour "capacity" (how many rest shifts that hour
+  // can absorb before coverage drops below the minimum), which prunes whole
+  // subtrees the instant a rest shift would over-fill an hour. Exact: the B&B
+  // bound is the sum of the best remaining rewards, so no better combination
+  // is skipped.
 
   // The hours removed from an "everyone works all week" baseline when the
   // listed days are taken as rest: exactly the shifts that start on those days
@@ -473,7 +475,7 @@
   }
 
   // Assigns a rest pair to every person for a fixed slot assignment, choosing
-  // the combination that minimises the weighted rest-rank penalty while keeping
+  // the combination that maximises the weighted rest reward while keeping
   // coverage and every no-work window. Exact depth-first search with a per-hour
   // capacity prune and a branch-and-bound bound, so it is fast and never skips
   // a better feasible combination.
@@ -504,23 +506,25 @@
       weights[j] = restWeightFor(person, pw, sw);
     }
 
-    var lb = new Array(k + 1);
-    lb[k] = 0;
-    for (var b = k - 1; b >= 0; b--) lb[b] = lb[b + 1] + weights[b] * options[b][0].rank;
+    // Optimistic ceiling: best reward still reachable from each person onward
+    // (their highest-weighted option, ignoring coverage).
+    var ub = new Array(k + 1);
+    ub[k] = 0;
+    for (var b = k - 1; b >= 0; b--) ub[b] = ub[b + 1] + weights[b] * options[b][0].points;
 
     var removals = new Int16Array(HOURS_PER_WEEK);
-    var bestCost = Infinity;
+    var bestReward = -Infinity;
     var bestPairs = null;
     var cur = new Array(k);
 
-    function* dfs(idx, cost) {
-      if (idx === k) { bestCost = cost; bestPairs = cur.slice(); return; }
-      if (cost + lb[idx] >= bestCost) return;
+    function* dfs(idx, reward) {
+      if (idx === k) { bestReward = reward; bestPairs = cur.slice(); return; }
+      if (reward + ub[idx] <= bestReward) return; // cannot beat what we have
       var list = options[idx];
       for (var x = 0; x < list.length; x++) {
         var opt = list[x];
-        var nc = cost + weights[idx] * opt.rank;
-        if (nc + lb[idx + 1] >= bestCost) break; // ranks ascend
+        var nr = reward + weights[idx] * opt.points;
+        if (nr + ub[idx + 1] <= bestReward) break; // points descend
         var hrs = opt.hours;
         var ok = true;
         for (var m = 0; m < hrs.length; m++) {
@@ -529,7 +533,7 @@
         if (!ok) continue;
         for (var n = 0; n < hrs.length; n++) removals[hrs[n]]++;
         cur[idx] = opt.pair;
-        yield* dfs(idx + 1, nc);
+        yield* dfs(idx + 1, nr);
         for (var q = 0; q < hrs.length; q++) removals[hrs[q]]--;
         yield* yieldTick(prog);
       }
@@ -538,12 +542,13 @@
     yield* dfs(0, 0);
 
     if (!bestPairs) return null;
-    return { cost: bestCost, pairs: bestPairs };
+    return { reward: bestReward, pairs: bestPairs };
   }
 
-  // Most-disliked-by-others-first list of workable slots for a window person.
-  // dislike(s) is the sum of every OTHER person's rank of slot s (higher = the
-  // rest of the team wants it less). Tie-break: later letter first.
+  // Least-wanted-by-others-first list of workable slots for a window person.
+  // dislike(s) is the sum of every OTHER person's points (weightOf) for slot
+  // s; a LOWER sum means the rest of the team wants it less. Tie-break: later
+  // letter first.
   function windowCandidatesFor(people, idx, slots, cfg) {
     var person = people[idx], arr = [];
     var n = people.length;
@@ -554,10 +559,10 @@
       var da = 0, db = 0;
       for (var p = 0; p < n; p++) {
         if (p === idx) continue;
-        da += rankOf(people[p].shiftOptions, a, 'hours');
-        db += rankOf(people[p].shiftOptions, b, 'hours');
+        da += weightOf(people[p].shiftWeights, a, 'hours');
+        db += weightOf(people[p].shiftWeights, b, 'hours');
       }
-      if (db !== da) return db - da;  // higher dislike = less wanted by others, tried first
+      if (da !== db) return da - db;  // lower summed points = least wanted, tried first
       return b - a;                    // tie-break: later letter first
     });
     return arr;
@@ -599,13 +604,13 @@
   //
   // Slot selection:
   //   - anyone with a no-work window is given the WORKABLE slot the REST of
-  //     the team least wants (highest sum of the other people's rankOf, i.e.
-  //     most disliked by everyone else), most-disliked first, later letter
+  //     the team least wants (LOWEST sum of the other people's weightOf, i.e.
+  //     least wanted by everyone else), least-wanted first, later letter
   //     first as a tie-break. A supplied `windowPin` (person index -> slot)
   //     pins that choice as a hard assignment: it OUTRANKS the rotation
   //     guarantees, so a guarantee that cannot coexist with it is dropped
   //     rather than the window slot moving. Without a pin, the window person's
-  //     candidates are enumerated most-disliked-first (first feasible wins);
+  //     candidates are enumerated least-wanted-first (first feasible wins);
   //   - anyone owed a slot guarantee (rotation fairness) is pinned there;
   //   - everyone else is permuted over the remaining slots.
   // Rest selection is then an exact per-assignment search (restAssign).
@@ -637,10 +642,20 @@
       return windowCandidatesFor(people, idx, slots, cfg);
     });
     for (var w0 = 0; w0 < winCands.length; w0++) {
-      if (winCands[w0].length === 0) return { best: Infinity, counters: counters };
+      if (winCands[w0].length === 0) return { best: -Infinity, counters: counters };
     }
 
-    var best = Infinity;
+    // Safe global ceiling on the rest reward (everyone on their highest
+    // weighted pair), used only to prune slot assignments that cannot win.
+    var restMaxBest = 0;
+    for (var rm = 0; rm < n; rm++) {
+      var rw = people[rm].restWeights || [];
+      var mx = 0;
+      for (var rq = 0; rq < rw.length; rq++) if (rw[rq] > mx) mx = rw[rq];
+      restMaxBest += restWeightFor(people[rm], pw, sw) * mx;
+    }
+
+    var best = -Infinity;
     var ties = new Map();
 
     function recordTie(slotOf, pairs) {
@@ -690,19 +705,19 @@
           counters.innerPerms++;
           counters.outers++;
           prog.outerChecked = counters.outers;
-          prog.hasBest = best < Infinity;
+          prog.hasBest = best > -Infinity;
           yield makeSnapshot(prog);
 
-          var slotCost = 0;
+          var slotReward = 0;
           for (var a = 0; a < n; a++) {
-            slotCost += slotWeightFor(people[a], pw, sw) *
-              rankOf(people[a].shiftOptions, slotOf[a], 'hours');
+            slotReward += slotWeightFor(people[a], pw, sw) *
+              weightOf(people[a].shiftWeights, slotOf[a], 'hours');
           }
-          if (slotCost > best) return;
+          if (slotReward + restMaxBest <= best) return;
           var res = yield* restAssign(slotOf, people, slots, cfg, pw, sw, prog, owed);
           if (!res) return;
-          var total = slotCost + res.cost;
-          if (total < best) {
+          var total = slotReward + res.reward;
+          if (total > best) {
             best = total;
             ties.clear();
             recordTie(slotOf, res.pairs);
@@ -764,7 +779,7 @@
       yield* winCombo(0, []);
     }
 
-    if (ties.size === 0) return { best: Infinity, counters: counters };
+    if (ties.size === 0) return { best: -Infinity, counters: counters };
     return {
       best: best,
       ties: Array.from(ties.values()),
@@ -812,13 +827,13 @@
     var owed = opts.owed || null;
 
     // Rotation guarantees (§5) are subordinate to the no-work-window rule.
-    // The window people's slots are rule-determined from the CURRENT rankings
-    // and pinned hard (see windowPinCombos). Under each pin we run the
+    // The window people's slots are rule-determined from the CURRENT weight
+    // arrays and pinned hard (see windowPinCombos). Under each pin we run the
     // guarantee subset search: it keeps the largest feasible set of guarantees
     // subject to that pin (see solveWithFallback), so a guarantee that cannot
     // coexist with the window slot is DROPPED, never the window slot. Only if a
     // pin is infeasible even with zero guarantees do we advance to the
-    // next-most-disliked workable slot — this keeps the tool solvable.
+    // next-least-wanted workable slot — this keeps the tool solvable.
     var guarantees = buildGuarantees(people, owed);
     var fallback = null;
     var result = null;
@@ -828,7 +843,7 @@
     while (!pinStep.done) {
       var windowPin = pinStep.value;
       var fb = yield* solveWithFallback(people, cfg, pw, sw, owed, guarantees, prog, windowPin);
-      if (fb.attempt && fb.attempt.best !== Infinity) {
+      if (fb.attempt && fb.attempt.best !== -Infinity) {
         fallback = fb;
         result = fb.attempt;
         break;
@@ -872,8 +887,8 @@
     });
     var sig = function (p) {
       return p.priority + '|' +
-        p.restOptions.map(pairKey).sort().join(',') + '|' +
-        p.shiftOptions.slice().sort().join(',');
+        (p.restWeights || []).join(',') + '|' +
+        (p.shiftWeights || []).join(',');
     };
     var groups = {};
     people.forEach(function (p) { (groups[sig(p)] = groups[sig(p)] || []).push(p.name); });
@@ -903,13 +918,10 @@
 
     var assignment = entries.map(function (e) {
       var p = e.person;
-      var priorityRank = p.priority === 'rest'
-        ? rankOf(p.restOptions, e.restDays, 'rest')
-        : hourRankFor(p, e.slotIndex);
-      var softRank = p.priority === 'rest'
-        ? hourRankFor(p, e.slotIndex)
-        : rankOf(p.restOptions, e.restDays, 'rest');
-      var priorityListLen = listLengthFor(p, p.priority === 'rest' ? 'rest' : 'hours');
+      var slotPoints = weightOf(p.shiftWeights, e.slotIndex, 'hours');
+      var restPoints = weightOf(p.restWeights, e.restDays, 'rest');
+      var priorityPoints = p.priority === 'rest' ? restPoints : slotPoints;
+      var softPoints = p.priority === 'rest' ? slotPoints : restPoints;
       return {
         name: e.name,
         slotIndex: e.slotIndex,
@@ -918,9 +930,10 @@
         restDays: e.restDays.slice(),
         restDayNames: restDayNames(e.restDays),
         priority: p.priority,
-        priorityRank: priorityRank,
-        softRank: softRank,
-        priorityMet: priorityRank < priorityListLen
+        slotPoints: slotPoints,
+        restPoints: restPoints,
+        priorityPoints: priorityPoints,
+        softPoints: softPoints
       };
     });
 
@@ -1003,11 +1016,11 @@
   //     at: <ISO 8601 string>,
   //     entries: [ {
   //       name:        <string>,
-  //       slotHit:     <bool>,  // assigned slot === their #1 slot
-  //       restHit:     <bool>,  // assigned rest pair === their #1 rest pair
+  //       slotHit:     <bool>,  // assigned slot === their top-pick slot
+  //       restHit:     <bool>,  // assigned rest pair === their top-pick pair
   //       slotTracked: <bool>,  // false => slot dimension exempt from rotation
-  //                             //          (no #1 slot, or a no-work window)
-  //       restTracked: <bool>   // false => person has no #1 rest pair
+  //                             //          (no positive top pick, or window)
+  //       restTracked: <bool>   // false => person has no positive top rest pick
   //     } ]
   //   }
   //
@@ -1024,14 +1037,14 @@
   // beyond it we switch to a documented greedy drop (see solveWithFallback).
   var SUBSET_ENUM_MAX = 12;
 
-  // Does this person have a #1 for the dimension, and is the dimension tracked
-  // for rotation at all?
+  // Does this person have a positive top pick for the dimension, and is the
+  // dimension tracked for rotation at all?
   function slotTrackedFor(person) {
-    return !!(person && person.shiftOptions && person.shiftOptions.length > 0) &&
+    return topOptionIndex(person && person.shiftWeights) >= 0 &&
       !(person && person.noWorkWindow);
   }
   function restTrackedFor(person) {
-    return !!(person && person.restOptions && person.restOptions.length > 0);
+    return topOptionIndex(person && person.restWeights) >= 0;
   }
 
   // Snapshot one run's hit/miss per person per dimension.
@@ -1044,12 +1057,14 @@
 
     var entries = list.map(function (a) {
       var p = byName[a.name];
-      var slotFirst = (p && p.shiftOptions) ? p.shiftOptions[0] : undefined;
-      var restFirst = (p && p.restOptions) ? p.restOptions[0] : undefined;
+      var slotTop = topOptionIndex(p && p.shiftWeights);
+      var restTop = topOptionIndex(p && p.restWeights);
       var slotTracked = slotTrackedFor(p);
       var restTracked = restTrackedFor(p);
-      var slotHit = slotTracked ? (a.slotIndex === slotFirst) : true;
-      var restHit = restTracked ? (pairKey(a.restDays) === pairKey(restFirst)) : true;
+      var slotHit = slotTracked ? (a.slotIndex === slotTop) : true;
+      var restHit = restTracked
+        ? (pairKey(a.restDays) === pairKey(ADJACENT_PAIRS[restTop]))
+        : true;
       return {
         name: a.name,
         slotHit: slotHit,
@@ -1064,8 +1079,8 @@
 
   // Who is owed a guarantee going into the next run, derived from the last
   // recorded run plus the carried-forward streaks.
-  //   - slot debt only for non-window people who missed their #1 slot;
-  //   - rest debt for anyone (window people included) who missed their #1 pair;
+  //   - slot debt only for non-window people who missed their top-pick slot;
+  //   - rest debt for anyone (window people included) who missed their top pair;
   //   - streaks are the current consecutive-miss counts (0 if none/hit).
   function computeOwed(history, people) {
     var streaks = (history && history.streaks) || {};
@@ -1093,15 +1108,15 @@
         // their slot streak.
         slotStreak = 0;
       } else {
-        var slotFirst = (p.shiftOptions || [])[0];
-        if (e && e.slotTracked !== false && slotFirst != null && !e.slotHit) {
-          slotDebt = slotFirst;
+        var slotTop = topOptionIndex(p.shiftWeights);
+        if (e && e.slotTracked !== false && slotTop >= 0 && !e.slotHit) {
+          slotDebt = slotTop;
         }
       }
 
-      var restFirst = (p.restOptions || [])[0];
-      if (e && e.restTracked !== false && restFirst != null && !e.restHit) {
-        pairDebt = restFirst;
+      var restTop = topOptionIndex(p.restWeights);
+      if (e && e.restTracked !== false && restTop >= 0 && !e.restHit) {
+        pairDebt = ADJACENT_PAIRS[restTop];
       }
 
       owed.push({
@@ -1112,12 +1127,13 @@
       });
 
       if (slotDebt != null) {
-        list.push(name + ' missed their #1 slot ' + SLOT_LETTERS[slotDebt] + ' for ' +
+        list.push(name + ' missed their top-pick (highest weight) slot ' +
+          SLOT_LETTERS[slotDebt] + ' for ' +
           slotStreak + ' run' + (slotStreak === 1 ? '' : 's') +
           ' in a row; it is guaranteed this run.');
       }
       if (pairDebt != null) {
-        list.push(name + ' missed their #1 rest pair ' +
+        list.push(name + ' missed their top-pick (highest weight) rest pair ' +
           restDayNames(pairDebt).join('-') + ' for ' + pairStreak +
           ' run' + (pairStreak === 1 ? '' : 's') +
           ' in a row; it is guaranteed this run.');
@@ -1241,11 +1257,11 @@
         attempts++;
         var res = yield* runMask(masks[mi]);
         yield makeSnapshot(prog);
-        if (res && res.best !== Infinity) {
+        if (res && res.best !== -Infinity) {
           return { attempt: res, mask: masks[mi], attempts: attempts };
         }
       }
-      return { attempt: { best: Infinity }, mask: -1, attempts: attempts };
+      return { attempt: { best: -Infinity }, mask: -1, attempts: attempts };
     }
 
     // Greedy fallback (> SUBSET_ENUM_MAX guarantees): keep trying the current
@@ -1260,7 +1276,7 @@
       attempts++;
       var fres = yield* runMask(mask);
       yield makeSnapshot(prog);
-      if (fres && fres.best !== Infinity) {
+      if (fres && fres.best !== -Infinity) {
         return { attempt: fres, mask: mask, attempts: attempts };
       }
       var anyKept = false;
@@ -1275,7 +1291,7 @@
       if (dropIdx < 0) break;
       kept[dropIdx] = false;
     }
-    return { attempt: { best: Infinity }, mask: -1, attempts: attempts };
+    return { attempt: { best: -Infinity }, mask: -1, attempts: attempts };
   }
 
   // Build the report attached to a successful result.
@@ -1327,8 +1343,8 @@
     // helpers
     mod: mod,
     pairKey: pairKey,
-    rankOf: rankOf,
     personDutyHours: personDutyHours,
+    weightOf: weightOf,
 
     // api
     computeSlots: computeSlots,

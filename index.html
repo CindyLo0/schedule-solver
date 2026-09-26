@@ -19,8 +19,9 @@
       <h2>What this page is for</h2>
       <p>
         A team covers a 24-hour day with 8 nine-hour shifts, staggered 3 hours apart.
-        Every person works 5 days and rests 2. This page captures each person's ranked
-        preferences and any hard personal constraints.
+        Every person works 5 days and rests 2. This page captures each person's
+        preference weights (0 to 100, higher meaning more wanted) and any hard personal
+        constraints.
       </p>
       <p>
         When the solver is run, it searches every possible assignment <strong>in this
@@ -30,7 +31,7 @@
       </p>
       <p class="how-head">How to check it yourself</p>
       <ol class="how">
-        <li>Change a preference below (for example, remove a rest-day pair from one person).</li>
+        <li>Change a weight below (for example, set one person's rest-day pair to 0).</li>
         <li>Run the solver and confirm the schedule changes to reflect that edit.</li>
         <li>Change it back and confirm the original schedule returns.</li>
         <li>Open the page source: <code>scheduler.js</code> holds the search and scoring,
@@ -56,9 +57,10 @@
     <section id="people-section">
       <h2>People and preferences</h2>
       <p class="note">
-        Toggle a chip to mark an option acceptable, then drag the ranked list to put the
-        most preferred option first. The highlighted priority is the dimension treated as
-        a requirement.
+        Give each rest-day pair and each shift slot a weight from 0 to 100; higher means
+        more wanted. Blank or out-of-range values count as 0, and the running total for
+        each dimension is shown next to it. The highlighted priority is the dimension
+        treated as a requirement.
       </p>
       <p class="note">All eight slots start at fixed times beginning 00:00.</p>
       <div id="people-list" class="people-list"></div>
@@ -162,7 +164,7 @@
               <thead>
                 <tr>
                   <th>Person</th><th>Slot</th><th>Hours</th><th>Rest days</th>
-                  <th>Priority</th><th>Priority choice</th><th>Secondary choice</th><th>Status</th>
+                  <th>Priority</th><th>Priority points</th><th>Other points</th>
                 </tr>
               </thead>
               <tbody></tbody>
@@ -189,7 +191,6 @@
   </footer>
 
   <script src="scheduler.js"></script>
-  <script src="vendor/Sortable.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

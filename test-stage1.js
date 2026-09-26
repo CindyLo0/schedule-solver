@@ -74,8 +74,11 @@ var daphine = S.defaultPeople.filter(function (p) { return p.name === 'Daphine';
 check('Daphine found in default dataset', !!daphine);
 check('Daphine has no exact-start lock (open domain)', daphine && daphine.exactStart == null);
 check('Daphine prioritises rest', daphine && daphine.priority === 'rest');
-check('Daphine #1 rest pair is Fri-Sat',
-      daphine && S.pairKey(daphine.restOptions[0]) === S.pairKey([4, 5]));
+check('Daphine shiftWeights has 8 entries and restWeights has 7',
+      daphine && daphine.shiftWeights.length === 8 && daphine.restWeights.length === 7);
+check('Daphine top rest pair (highest weight) is Fri-Sat',
+      daphine && S.weightOf(daphine.restWeights, [4, 5], 'rest') ===
+        Math.max.apply(null, daphine.restWeights));
 check('Daphine no-work window is Fri 18:00 -> Sat 18:00',
       daphine && daphine.noWorkWindow &&
       daphine.noWorkWindow.startDay === 4 && daphine.noWorkWindow.startHour === 18 &&
@@ -127,28 +130,34 @@ S.DAYS.forEach(function (day, d) {
 });
 
 // ---------------------------------------------------------------------
-console.log('\n5. scoreAssignment — open-domain rank semantics');
-// Lower is better. A person's priority dimension is weighted 100, the other 1.
-// A value that is not listed gets rank = list.length (one worse than last).
+console.log('\n5. scoreAssignment — weighted points, higher is better');
+// Higher is better. A person's priority dimension is weighted 100, the other 1,
+// and both multiply the 0..100 points transcribed from weighted.txt.
 var daphSheets = [{ person: daphine, name: 'Daphine', slotIndex: 6, slotStart: 18, restDays: [4, 5] }];
-eq('Daphine on her #1 slot and #1 rest pair scores 0',
-   S.scoreAssignment(daphSheets, config), 0);
+// priority rest: 100 * restPoints(35, Fri-Sat) + 1 * slotPoints(30, 18:00) = 3530.
+eq('Daphine on her top slot (18:00) and top rest pair scores 100*35 + 30 = 3530',
+   S.scoreAssignment(daphSheets, config), 3530);
 
 var daphOff = [{ person: daphine, name: 'Daphine', slotIndex: 5, slotStart: 15, restDays: [0, 1] }];
-// priority rest: unranked rest pair rank 5 (= list length) * 100, + slot rank 1 * 1 = 501.
-eq('Daphine unranked rest pair (rank = list length) is weighted heavily: 501',
-   S.scoreAssignment(daphOff, config), 501);
+// priority rest: 100 * restPoints(7, Mon-Tue) + 1 * slotPoints(20, 15:00) = 720.
+eq('Daphine Mon-Tue (7) and 15:00 (20) scores 100*7 + 20 = 720',
+   S.scoreAssignment(daphOff, config), 720);
 
 var cindy = S.defaultPeople[0];
-var cindyOff = [{ person: cindy, name: 'Cindy', slotIndex: 2, slotStart: 6, restDays: [0, 1] }];
-// priority hours: slot rank 3 * 100, + rest rank 1 * 1 = 301.
-eq('Cindy slot rank 3 is weighted heavily: 301',
-   S.scoreAssignment(cindyOff, config), 301);
+var cindyBest = [{ person: cindy, name: 'Cindy', slotIndex: 5, slotStart: 15, restDays: [0, 1] }];
+// priority hours: 100 * slotPoints(32, 15:00) + 1 * restPoints(30, Mon-Tue) = 3230.
+eq('Cindy on her top slot (15:00) and top rest pair scores 100*32 + 30 = 3230',
+   S.scoreAssignment(cindyBest, config), 3230);
+
+var cindyOff = [{ person: cindy, name: 'Cindy', slotIndex: 2, slotStart: 6, restDays: [1, 2] }];
+// priority hours: 100 * slotPoints(12, 06:00) + 1 * restPoints(7, Tue-Wed) = 1207.
+eq('Cindy slot 06:00 (12) and rest Tue-Wed (7) scores 100*12 + 7 = 1207',
+   S.scoreAssignment(cindyOff, config), 1207);
 
 var score = S.scoreAssignment(full, config);
 check('scoreAssignment on the hand-built sheet returns a finite number',
       typeof score === 'number' && isFinite(score));
-console.log('    hand-built assignment score (lower is better): ' + score);
+console.log('    hand-built assignment score (higher is better): ' + score);
 
 // ---------------------------------------------------------------------
 console.log('\n----------------------------------------');
