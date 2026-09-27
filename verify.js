@@ -173,7 +173,7 @@ function main(result) {
   assert(shiftProblems.length === 0, 'all shifts are 9 clean consecutive hours',
     shiftProblems.join('; '));
 
-  section('4b. Weighted points (0..100) and priority/soft consistency (effective weights)');
+  section('4b. Category points, percentages and the 80/20 round score (effective weights)');
   var byName = {};
   defaultPeople.forEach(function (p) { byName[p.name] = p; });
   var pointProblems = [];
@@ -203,8 +203,28 @@ function main(result) {
     if (a.softPoints !== expectedSoft) {
       pointProblems.push(a.name + ': softPoints ' + a.softPoints + ' != ' + expectedSoft);
     }
+    // Percentages and the combined 80/20 score, recomputed independently.
+    var topP = Math.max.apply(null, p.priority === 'rest' ? ew.restWeights : ew.shiftWeights);
+    var topS = Math.max.apply(null, p.priority === 'rest' ? ew.shiftWeights : ew.restWeights);
+    var expPriPct = topP > 0 ? expectedPriority / topP : 1;
+    var expSoftPct = topS > 0 ? expectedSoft / topS : 1;
+    var expScore = Scheduler.SPLIT_PRIORITY * expPriPct + Scheduler.SPLIT_SOFT * expSoftPct;
+    if (!approx(a.priorityPct, expPriPct, 1e-9)) {
+      pointProblems.push(a.name + ': priorityPct ' + a.priorityPct + ' != ' + expPriPct);
+    }
+    if (!approx(a.softPct, expSoftPct, 1e-9)) {
+      pointProblems.push(a.name + ': softPct ' + a.softPct + ' != ' + expSoftPct);
+    }
+    if (!approx(a.score, expScore, 1e-9)) {
+      pointProblems.push(a.name + ': score ' + a.score + ' != ' + expScore);
+    }
+    if (a.priorityPct < -1e-9 || a.priorityPct > 1 + 1e-9 ||
+        a.softPct < -1e-9 || a.softPct > 1 + 1e-9 ||
+        a.score < -1e-9 || a.score > 1 + 1e-9) {
+      pointProblems.push(a.name + ': a percentage or score is outside 0..1');
+    }
   });
-  assert(pointProblems.length === 0, 'every entry\'s points are in 0..100 and match the person\'s effective weights',
+  assert(pointProblems.length === 0, 'every entry\'s points, percentages and score match the person\'s effective weights',
     pointProblems.join('; '));
 
   section('5. No-work window respected, and the general flattening rule');
@@ -271,10 +291,19 @@ function main(result) {
     if (result.maxTotal !== fair.maxTotal) consistency.push('result.maxTotal != fairness.maxTotal');
     if (result.band !== Scheduler.FAIRNESS_BAND) consistency.push('result.band != FAIRNESS_BAND');
     if (fair.entries.length !== defaultPeople.length) consistency.push('entries count != people count');
+    if (typeof fair.objectiveValue !== 'number' || !isFinite(fair.objectiveValue)) {
+      consistency.push('objectiveValue not a finite number');
+    }
     var maxShort = -Infinity;
     fair.entries.forEach(function (e) {
-      if (e.ideal <= 0) return;
       if (!approx(e.shortfall, 1 - e.satisfaction, 1e-9)) consistency.push(e.name + ': shortfall != 1 - satisfaction');
+      if (!approx(e.debt, 1 - e.satisfaction, 1e-9)) consistency.push(e.name + ': debt != 1 - satisfaction');
+      if (!approx(e.personWeight, 1 + Scheduler.FAIRNESS_MU * e.debt, 1e-9)) {
+        consistency.push(e.name + ': personWeight != 1 + MU*debt');
+      }
+      if (typeof e.score !== 'number' || e.score < -1e-9 || e.score > 1 + 1e-9) {
+        consistency.push(e.name + ': score out of 0..1');
+      }
       if (e.shortfall > maxShort) maxShort = e.shortfall;
     });
     if (!approx(fair.worstShortfall, maxShort, 1e-9)) consistency.push('worstShortfall != max entry shortfall');
@@ -310,16 +339,42 @@ function main(result) {
       '  start ' + pad2(a.slotStart + ':00') +
       '  rest ' + a.restDayNames.join('-') +
       '  priority=' + a.priority +
-      ' (priority points ' + a.priorityPoints + ', soft points ' + a.softPoints + ')');
+      '  pct ' + a.priorityPct.toFixed(3) + '/' + a.softPct.toFixed(3) +
+      '  score ' + a.score.toFixed(3));
   });
   console.log('  score=' + result.score +
     '  maxTotal=' + result.maxTotal +
+    '  band=' + (result.band * 100).toFixed(1) + '%' +
     '  minCoverage=' + result.minCoverage +
     '  maxCoverage=' + result.maxCoverage +
     '  totalPersonHours=' + result.totalPersonHours);
   console.log('  ties=' + (result.tie ? result.tie.count : 'n/a') +
     '  seed=' + (result.tie ? result.tie.seed : 'n/a') +
     '  elapsedMs=' + result.elapsedMs);
+  console.log('  timing=' + JSON.stringify(result.timing));
+
+  section('9. Frozen public interface');
+  var needFns = ['mod', 'pairKey', 'personDutyHours', 'weightOf', 'effectiveWeights',
+    'effectivePeople', 'computeSlots', 'buildCoverageGrid', 'meetsCoverage',
+    'satisfiesNoWorkWindow', 'scoreAssignment', 'solve', 'solveAsync',
+    'buildRunRecord', 'computeFairness', 'appendHistory'];
+  var missing = needFns.filter(function (f) { return typeof Scheduler[f] !== 'function'; });
+  assert(missing.length === 0, 'all frozen functions are exported', missing.join(','));
+  var constNames = ['SPLIT_PRIORITY', 'SPLIT_SOFT', 'FAIRNESS_MU', 'FAIRNESS_BAND',
+    'DECAY_HALF_LIFE', 'BREAKER_STREAK', 'BREAKER_GAP', 'BREAKER_RATIO',
+    'BREAKER_MIN_SHORTFALL', 'DEFAULT_TIE_SEED', 'HISTORY_VERSION', 'MAX_HISTORY_RUNS',
+    'DAYS', 'SLOT_LETTERS', 'ADJACENT_PAIRS'];
+  var badConst = constNames.filter(function (f) { return Scheduler[f] === undefined; });
+  assert(badConst.length === 0, 'all frozen constants are exported', badConst.join(','));
+  assert(Scheduler.SPLIT_PRIORITY === 0.8 && Scheduler.SPLIT_SOFT === 0.2,
+    'the 80/20 split is exported as 0.8 / 0.2');
+  assert(Scheduler.HISTORY_VERSION === 3, 'HISTORY_VERSION is 3');
+  assert(Scheduler.PRIORITY_WEIGHT === undefined && Scheduler.SOFT_WEIGHT === undefined &&
+    Scheduler.FAIRNESS_LAMBDA === undefined, 'the old 100x/1x and lambda tunables are gone');
+  assert(typeof result.fairness.breakerFired.length === 'number' &&
+    Array.isArray(result.fairness.breakerFired) &&
+    Array.isArray(result.fairness.breakerDropped),
+    'fairness carries breakerFired and breakerDropped arrays');
 }
 
 function pad(s, n) { s = String(s); while (s.length < n) s += ' '; return s; }

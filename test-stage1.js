@@ -115,34 +115,47 @@ check('meetsCoverage(grid, 2) is true', S.meetsCoverage(grid, 2) === true);
 check('meetsCoverage(grid, 3) is false', S.meetsCoverage(grid, 3) === false);
 
 // ---------------------------------------------------------------------
-console.log('\n5. scoreAssignment — weighted points on EFFECTIVE weights, higher is better');
-// Daphine has a no-work window, so her effective weights are flat: every slot
-// is 100/8 = 12.5 and every rest pair is 100/7. Priority 'rest' means
-// 100 * (100/7) + 1 * 12.5 = 1441.0714..., whichever slot/pair she is given.
-var daphFlat = 100 * (100 / S.ADJACENT_PAIRS.length) + 1 * (100 / config.numSlots);
+console.log('\n5. scoreAssignment — 80/20 category percentages, higher is better');
+// The model: roundScore = 0.8 * priorityPoints/topPriorityWeight
+//                        + 0.2 * softPoints/topSoftWeight.
+check('SPLIT_PRIORITY is 0.8', S.SPLIT_PRIORITY === 0.8);
+check('SPLIT_SOFT is 0.2', S.SPLIT_SOFT === 0.2);
+check('the two splits sum to 1', approx(S.SPLIT_PRIORITY + S.SPLIT_SOFT, 1, 1e-12));
+check('the old 100x/1x raw weighting is gone',
+  S.PRIORITY_WEIGHT === undefined && S.SOFT_WEIGHT === undefined);
+
+// Daphine has a no-work window, so her effective weights are flat and every
+// option is her own top pick on both dimensions => exactly 1.0.
 var daphAny = [{ person: daphine, name: 'Daphine', slotIndex: 6, slotStart: 18, restDays: [4, 5] }];
-check('Daphine scores her flat total 100*(100/7) + 12.5 whichever option',
-  approx(S.scoreAssignment(daphAny, config), daphFlat, 1e-9));
+check('Daphine scores exactly 1.0 on any window-safe option',
+  approx(S.scoreAssignment(daphAny, config), 1, 1e-9));
 
 var daphAny2 = [{ person: daphine, name: 'Daphine', slotIndex: 0, slotStart: 0, restDays: [0, 1] }];
-check('Daphine scores the same flat total on a different option',
-  approx(S.scoreAssignment(daphAny2, config), daphFlat, 1e-9));
+check('Daphine scores the same 1.0 on a different option',
+  approx(S.scoreAssignment(daphAny2, config), 1, 1e-9));
 
 var cindy = S.defaultPeople[0];
+// Cindy: hours priority, top shift 32 (15:00), top rest 30 (Mon-Tue).
 var cindyBest = [{ person: cindy, name: 'Cindy', slotIndex: 5, slotStart: 15, restDays: [0, 1] }];
-// priority hours: 100 * slotPoints(32, 15:00) + 1 * restPoints(30, Mon-Tue) = 3230.
-eq('Cindy on her top slot (15:00) and top rest pair scores 100*32 + 30 = 3230',
-   S.scoreAssignment(cindyBest, config), 3230);
+// 0.8 * 32/32 + 0.2 * 30/30 = 1.
+check('Cindy on her top slot (15:00) and top rest pair scores exactly 1.0',
+  approx(S.scoreAssignment(cindyBest, config), 1, 1e-9));
 
 var cindyOff = [{ person: cindy, name: 'Cindy', slotIndex: 2, slotStart: 6, restDays: [1, 2] }];
-// priority hours: 100 * slotPoints(12, 06:00) + 1 * restPoints(7, Tue-Wed) = 1207.
-eq('Cindy slot 06:00 (12) and rest Tue-Wed (7) scores 100*12 + 7 = 1207',
-   S.scoreAssignment(cindyOff, config), 1207);
+// 0.8 * 12/32 + 0.2 * 7/30 = 0.3 + 0.0466667 = 0.3466667.
+check('Cindy at 06:00 (12) and rest Tue-Wed (7) scores 0.8*12/32 + 0.2*7/30 = 0.346667',
+  approx(S.scoreAssignment(cindyOff, config), 0.8 * 12 / 32 + 0.2 * 7 / 30, 1e-9));
+
+var cindyOff2 = [{ person: cindy, name: 'Cindy', slotIndex: 4, slotStart: 12, restDays: [3, 4] }];
+// 0.8 * 20/32 + 0.2 * 22/30 = 0.5 + 0.1466667 = 0.6466667.
+check('Cindy at 12:00 (20) and rest Thu-Fri (22) scores 0.8*20/32 + 0.2*22/30 = 0.646667',
+  approx(S.scoreAssignment(cindyOff2, config), 0.8 * 20 / 32 + 0.2 * 22 / 30, 1e-9));
 
 var score = S.scoreAssignment(full, config);
 check('scoreAssignment on the hand-built sheet returns a finite number',
       typeof score === 'number' && isFinite(score));
-console.log('    hand-built assignment score (higher is better): ' + score);
+check('a full 8-person score is at most 8', score <= 8 + 1e-9);
+console.log('    hand-built assignment score (0..8, higher is better): ' + score);
 
 // ---------------------------------------------------------------------
 console.log('\n----------------------------------------');

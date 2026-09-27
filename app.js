@@ -7,9 +7,11 @@
  *   { name, shiftWeights, restWeights, priority, noWorkWindow }
  * Each weight is 0..100; higher means more wanted.
  *
- * Fairness is scored in POINTS and SATISFACTION. The
- * engine flattens both weight lists of anyone with a no-work window, so this
- * screen shows those people their equal (flat) values and locks the boxes.
+ * Scoring is the 80/20 model: each person's chosen priority dimension counts
+ * as 80% of their round score and the other dimension as 20%, so the screen
+ * talks in priority/other percentages, satisfaction and debt. The engine
+ * flattens both weight lists of anyone with a no-work window, so this screen
+ * shows those people their equal (flat) values and locks the boxes.
  */
 
 (function () {
@@ -45,20 +47,22 @@
   var views = []; // per-person DOM references
 
   // ------------------------------------------------------------------
-  // Cross-run fairness history (persisted in this browser, version 2)
+  // Cross-run fairness history (persisted in this browser, version 3)
   // ------------------------------------------------------------------
   //
   // Shape: {
-  //   version: 2,
-  //   runs:      [ { at, entries:[ { name, points, slotPoints, restPoints,
-  //                                  priorityPoints, softPoints, ideal, windowed } ] } ],
+  //   version: 3,
+  //   runs:      [ { at, entries:[ { name, priorityPct, softPct, score,
+  //                                  slotPoints, restPoints, priorityPoints,
+  //                                  softPoints, windowed } ] } ],
   //   fingerprints: { "<name>": "<string>" },
-  //   breaker:      { "<name>": { worstStreak: <n> } }
+  //   breaker:      { "<name>": <record> }
   // }
   //
-  // The v1 key is deliberately ignored, so old data can never be read here.
+  // Older keys and any run data whose version is not the engine's current
+  // HISTORY_VERSION are deliberately ignored, so stale data is never read.
 
-  var HISTORY_KEY = 'shift-solver-history-v2';
+  var HISTORY_KEY = 'shift-solver-history-v3';
   var storageWorking = true;
   var history = loadHistory();
 
@@ -180,18 +184,37 @@
     return { shiftWeights: p.shiftWeights, restWeights: p.restWeights };
   }
 
-  // Normalise a satisfaction value to a 0..100 percentage number. The engine
-  // may report it as a ratio (0..1) or already as a percentage.
+  // The engine reports the category percentages (priorityPct/softPct) and the
+  // combined score as ratios in 0..1. Turn any of those into a 0..100 number,
+  // while leaving an already-percentage value alone.
+  function ratioToPct(v) {
+    var n = Number(v);
+    if (!isFinite(n)) return null;
+    return (n >= 0 && n <= 1.0000001) ? n * 100 : n;
+  }
+
+  function fmtPct(v) {
+    var n = ratioToPct(v);
+    return n === null ? '\u2014' : round1(n) + '%';
+  }
+
+  // A plain count, rounded to two decimals at most (used for debt and the
+  // fairness objective value, which are raw score units).
+  function fmtNum(v) {
+    var n = Number(v);
+    if (!isFinite(n)) return '\u2014';
+    return String(Math.round(n * 100) / 100);
+  }
+
+  // Combined satisfaction for a fairness entry, as a 0..100 number. Falls back
+  // to the entry's own round score when satisfaction is not reported.
   function satisfactionValue(entry) {
     if (!entry) return null;
     if (typeof entry.satisfaction === 'number' && isFinite(entry.satisfaction)) {
-      var s = entry.satisfaction;
-      if (s >= 0 && s <= 1.0000001) s *= 100;
-      return s;
+      return ratioToPct(entry.satisfaction);
     }
-    if (typeof entry.ideal === 'number' && entry.ideal > 0 &&
-        typeof entry.points === 'number') {
-      return 100 * entry.points / entry.ideal;
+    if (typeof entry.score === 'number' && isFinite(entry.score)) {
+      return ratioToPct(entry.score);
     }
     return null;
   }
@@ -502,7 +525,7 @@
   }
 
   // ------------------------------------------------------------------
-  // Fairness (standing, ledger, recent runs) — points and satisfaction
+  // Fairness (standing, ledger, recent runs) — satisfaction and debt
   // ------------------------------------------------------------------
 
   function currentFairness(people) {
@@ -527,19 +550,20 @@
     return null;
   }
 
-  function breakerStreak(name) {
-    var b = (history && history.breaker) || {};
-    var rec = b[name];
-    return (rec && typeof rec.worstStreak === 'number') ? rec.worstStreak : 0;
+  // Names owed a pick this run, keyed by name, sourced from the fairness
+  // breaker lists the engine returns. The pre-run state reports them under
+  // "breaker"; a finished run reports "breakerFired".
+  function breakerByName(f) {
+    var out = {};
+    ['breakerFired', 'breaker'].forEach(function (key) {
+      var list = (f && Array.isArray(f[key])) ? f[key] : [];
+      list.forEach(function (b) { if (b && b.name) out[b.name] = b; });
+    });
+    return out;
   }
 
-  function entryPendingBreaker(entry) {
-    return !!(entry && (entry.breakerPending || entry.pendingBreaker ||
-      entry.breakerArmed || entry.breakered));
-  }
-
-  // Show who is behind, by satisfaction, with their running points, and flag
-  // any pending breaker.
+  // Show who is behind, by satisfaction, with how far in debt they are, and
+  // flag anyone the fairness breaker is lifting this run.
   function refreshStanding() {
     var box = document.getElementById('standing-box');
     if (!box) return;
@@ -549,7 +573,7 @@
     var entries = fairnessEntries(f);
     if (!entries.length) {
       box.appendChild(el('p', 'note',
-        'No runs recorded yet. Everyone starts level \u2014 the first run is a plain best-points search.'));
+        'No runs recorded yet. Everyone starts level \u2014 the first run is a plain best-score search.'));
       return;
     }
 
@@ -561,6 +585,7 @@
     var minVal = nums.length ? Math.min.apply(null, nums) : null;
     var maxVal = nums.length ? Math.max.apply(null, nums) : null;
     var spread = (minVal !== null && maxVal !== null) ? (maxVal - minVal) : 0;
+    var fired = breakerByName(f);
 
     var list = el('ul', 'standing-list');
     entries.slice().sort(function (a, b) {
@@ -571,26 +596,22 @@
     }).forEach(function (e) {
       var li = el('li', 'standing-item');
       var sat = satisfactionValue(e);
-      var streak = breakerStreak(e.name);
-      var pending = entryPendingBreaker(e) || streak > 0;
+      var owed = fired[e.name];
 
       var main = el('div', 'standing-main');
       main.appendChild(el('span', 'standing-name', e.name));
       main.appendChild(el('span', 'standing-sat', 'satisfaction ' + fmtSatisfaction(e)));
-      var points = (typeof e.lifetimePoints === 'number') ? e.lifetimePoints
-        : (typeof e.points === 'number' ? e.points : 0);
-      var rounds = (typeof e.rounds === 'number')
-        ? ' over ' + e.rounds + ' run' + (e.rounds === 1 ? '' : 's') : '';
-      main.appendChild(el('span', 'standing-points', 'running points ' + points + rounds));
+      main.appendChild(el('span', 'standing-points', 'debt ' + fmtPct(e.debt)));
       li.appendChild(main);
 
       var marks = el('div', 'standing-marks');
       if (spread > 0.05 && sat !== null && Math.abs(sat - minVal) < 0.05) {
         marks.appendChild(el('span', 'standing-mark', 'near the bottom'));
       }
-      if (pending) {
+      if (owed) {
         marks.appendChild(el('span', 'standing-mark breaker',
-          'pending breaker' + (streak > 0 ? ' (shortfall streak ' + streak + ')' : '')));
+          'owed a pick this run: ' + breakerWhat(owed.dimension, owed.value) +
+          (owed.reason ? ' \u2014 ' + owed.reason : '')));
       }
       if (e.windowed) {
         marks.appendChild(el('span', 'standing-note',
@@ -603,14 +624,15 @@
     box.appendChild(list);
   }
 
-  function latestRunPoints(name) {
+  // The round score (0..1 ratio) a person earned in the most recent run.
+  function latestRunScore(name) {
     var runs = (history && history.runs) || [];
     if (!runs.length) return null;
     var last = runs[runs.length - 1];
     var entries = (last && last.entries) || [];
     for (var i = 0; i < entries.length; i++) {
       if (entries[i].name === name) {
-        return typeof entries[i].points === 'number' ? entries[i].points : null;
+        return typeof entries[i].score === 'number' ? entries[i].score : null;
       }
     }
     return null;
@@ -624,17 +646,14 @@
     var f = currentFairness(state);
     state.forEach(function (p) {
       var e = fairnessByName(f, p.name);
-      var cumulative = e
-        ? ((typeof e.lifetimePoints === 'number') ? e.lifetimePoints
-          : (typeof e.points === 'number' ? e.points : 0))
-        : 0;
-      var latest = latestRunPoints(p.name);
+      var debt = e ? fmtPct(e.debt) : '\u2014';
+      var latest = latestRunScore(p.name);
 
       var tr = document.createElement('tr');
       tr.appendChild(el('td', null, p.name));
       tr.appendChild(el('td', null, e ? fmtSatisfaction(e) : '\u2014'));
-      tr.appendChild(el('td', 'points', String(cumulative)));
-      tr.appendChild(el('td', 'points', latest === null ? '\u2014' : String(latest)));
+      tr.appendChild(el('td', 'points', debt));
+      tr.appendChild(el('td', 'points', latest === null ? '\u2014' : fmtPct(latest)));
       tbody.appendChild(tr);
     });
   }
@@ -654,12 +673,15 @@
     runs.slice().reverse().slice(0, 5).forEach(function (run) {
       var entries = (run && run.entries) || [];
       var total = 0;
+      var counted = 0;
       var worst = null;
-      var worstPts = Infinity;
+      var worstScore = Infinity;
       entries.forEach(function (e) {
-        var pts = (typeof e.points === 'number') ? e.points : 0;
-        total += pts;
-        if (pts < worstPts) { worstPts = pts; worst = e.name; }
+        var s = (typeof e.score === 'number') ? e.score : null;
+        if (s === null) return;
+        total += s;
+        counted++;
+        if (s < worstScore) { worstScore = s; worst = e.name; }
       });
 
       var when = 'unknown time';
@@ -668,8 +690,9 @@
         if (!isNaN(d.getTime())) when = d.toLocaleString();
       } catch (err) { /* keep the placeholder */ }
 
-      var summary = entries.length + ' people, ' + total + ' points awarded';
-      if (worst) summary += '; least to ' + worst + ' (' + worstPts + ' points)';
+      var summary = entries.length + ' people, average score ' +
+        (counted ? fmtPct(total / counted) : '\u2014');
+      if (worst) summary += '; lowest score to ' + worst + ' (' + fmtPct(worstScore) + ')';
 
       var row = el('div', 'recent-run');
       row.appendChild(el('span', 'recent-when', when + ': '));
@@ -770,7 +793,10 @@
 
       var seedInput = document.getElementById('tie-seed');
       var seed = parseInt(seedInput.value, 10);
-      if (isNaN(seed)) { seed = S.DEFAULT_TIE_SEED; seedInput.value = String(seed); }
+      if (isNaN(seed)) {
+        seed = (typeof S.DEFAULT_TIE_SEED === 'number') ? S.DEFAULT_TIE_SEED : 1;
+        seedInput.value = String(seed);
+      }
       logLine('Tie-break rule: seeded random draw (mulberry32), seed ' + seed + '.');
 
       S.solveAsync(frozen, config, {
@@ -806,26 +832,26 @@
       }).then(function (result) {
         logLine('Search finished in ' + result.elapsedMs + ' ms (' + snapshots + ' progress updates).');
         if (result.ok) {
-          logLine('Best points score ' + result.score + '. Coverage ' +
+          logLine('Best combined score ' + fmtNum(result.score) + '. Coverage ' +
             result.minCoverage + ' to ' + result.maxCoverage + '.');
           logLine('Checked ' + statOrZero(result.stats, 'innerPerms') + ' slot arrangements and ' +
             statOrZero(result.stats, 'innerChecked') + ' coverage checks across ' +
             statOrZero(result.stats, 'outers') + ' outer arrangements.');
           if (result.tie) {
-            logLine('Top-points schedules: ' + result.tie.count +
+            logLine('Top-score schedules: ' + result.tie.count +
               (result.tie.count > 1
                 ? ' (tied). Tie-break chose entry #' + (result.tie.chosenIndex + 1) +
                   ' using seed ' + result.tie.seed + '.'
                 : ' (no tie).'));
           }
           if (result.fairness) {
-            logLine('Fairness: awarded ' + result.fairness.achievedTotal + ' of a best-possible ' +
-              result.fairness.maxTotal + ' points' +
+            logLine('Fairness: scored ' + fmtNum(result.fairness.achievedTotal) +
+              ' of a best-possible ' + fmtNum(result.fairness.maxTotal) +
               (typeof result.fairness.bandPercent === 'number'
-                ? ' (band ' + fmtWeight(result.fairness.bandPercent) + '%)' : '') + '.');
+                ? ' (band ' + fmtNum(result.fairness.bandPercent) + '%)' : '') + '.');
             if (result.fairness.worstName) {
-              logLine('Worst-off this run: ' + result.fairness.worstName +
-                ' (short by ' + result.fairness.worstShortfall + ').');
+              logLine('Most in debt this run: ' + result.fairness.worstName +
+                ' (short by ' + fmtPct(result.fairness.worstShortfall) + ').');
             }
             var fired = (result.fairness.breakerFired || []).length;
             var dropped = (result.fairness.breakerDropped || []).length;
@@ -925,8 +951,9 @@
     box.appendChild(el('p', null,
       t.count + ' schedules tied at the top score of ' + result.score + '.'));
 
+    var swing = t.swingNames || [];
     var inter = (t.interchangeableGroups || []).map(function (g) {
-      return g.filter(function (n) { return t.swingNames.indexOf(n) >= 0; });
+      return g.filter(function (n) { return swing.indexOf(n) >= 0; });
     }).filter(function (g) { return g.length > 1; });
     inter.forEach(function (g) {
       box.appendChild(el('p', null,
@@ -962,24 +989,25 @@
           else if (v > result.minCoverage) above++;
         });
       });
-      var prioritySum = result.assignment.reduce(function (s, a) { return s + a.priorityPoints; }, 0);
-      var maxPriority = result.assignment.length * 100;
       tiles.push({ label: 'Minimum coverage', value: String(result.minCoverage) });
       tiles.push({ label: 'Maximum coverage', value: String(result.maxCoverage) });
       tiles.push({ label: 'Hours at minimum', value: String(atMin) });
       tiles.push({ label: 'Hours above minimum', value: String(above) });
       tiles.push({ label: 'Total scheduled hours', value: String(result.totalPersonHours) });
-      tiles.push({ label: 'Priority weight points', value: prioritySum + ' / ' + maxPriority });
+      tiles.push({ label: 'Schedule score', value: fmtNum(result.score) });
       if (result.fairness) {
-        tiles.push({ label: 'Points awarded', value: String(result.fairness.achievedTotal) });
-        tiles.push({ label: 'Best possible points', value: String(result.fairness.maxTotal) });
+        tiles.push({ label: 'Score awarded', value: fmtNum(result.fairness.achievedTotal) });
+        tiles.push({ label: 'Best possible score', value: fmtNum(result.fairness.maxTotal) });
         if (typeof result.fairness.bandPercent === 'number') {
-          tiles.push({ label: 'Fairness band', value: fmtWeight(result.fairness.bandPercent) + '%' });
+          tiles.push({ label: 'Fairness band', value: fmtNum(result.fairness.bandPercent) + '%' });
+        }
+        if (typeof result.fairness.objectiveValue === 'number') {
+          tiles.push({ label: 'Fairness objective', value: fmtNum(result.fairness.objectiveValue) });
         }
         if (result.fairness.worstName) {
           tiles.push({
-            label: 'Worst-off this run',
-            value: result.fairness.worstName + ' (' + result.fairness.worstShortfall + ' short)'
+            label: 'Most in debt this run',
+            value: result.fairness.worstName + ' (' + fmtPct(result.fairness.worstShortfall) + ' short)'
           });
         }
       }
@@ -1003,6 +1031,7 @@
 
     result.assignment.forEach(function (a) {
       var tr = document.createElement('tr');
+      var fe = fairnessByName(result.fairness, a.name);
 
       tr.appendChild(el('td', null, a.name));
       tr.appendChild(el('td', null, a.slotLetter + ' ' + fmtHour(a.slotStart)));
@@ -1010,8 +1039,9 @@
       tr.appendChild(el('td', null, fmtHour(a.slotStart) + '\u2013' + fmtHour(end)));
       tr.appendChild(el('td', null, a.restDayNames.join('\u2013')));
       tr.appendChild(el('td', null, a.priority === 'rest' ? 'Rest days' : 'Work hours'));
-      tr.appendChild(el('td', 'points', String(a.priorityPoints)));
-      tr.appendChild(el('td', 'points', String(a.softPoints)));
+      tr.appendChild(el('td', 'points', fmtPct(a.priorityPct)));
+      tr.appendChild(el('td', 'points', fmtPct(a.softPct)));
+      tr.appendChild(el('td', 'points', fe ? fmtSatisfaction(fe) : fmtPct(a.score)));
 
       tbody.appendChild(tr);
     });
@@ -1065,8 +1095,9 @@
     });
   }
 
-  // Post-run fairness: totals, the worst-off person, and any breaker that
-  // fired or was dropped, with the engine's own reasons.
+  // Post-run fairness: achieved vs best-possible score inside the band, the
+  // person most in debt, the objective value, and any breaker that fired or
+  // was dropped, with the engine's own reasons.
   function renderFairnessResult(result) {
     var box = document.getElementById('fairness-result');
     if (!box) return;
@@ -1079,20 +1110,26 @@
     }
 
     box.appendChild(el('p', null,
-      'This schedule awarded ' + f.achievedTotal + ' of a best-possible ' + f.maxTotal + ' points' +
+      'This schedule scored ' + fmtNum(f.achievedTotal) + ' of a best-possible ' + fmtNum(f.maxTotal) +
       (typeof f.bandPercent === 'number'
-        ? ', inside a fairness band of ' + fmtWeight(f.bandPercent) + '% of that best total.' : '.')));
+        ? ', inside a fairness band of ' + fmtNum(f.bandPercent) + '% of that best total.' : '.')));
+
+    if (typeof f.objectiveValue === 'number') {
+      box.appendChild(el('p', null,
+        'Fairness objective value for this run: ' + fmtNum(f.objectiveValue) +
+        ' (the engine\u2019s combined aim of a high total and a small worst shortfall).'));
+    }
 
     if (f.achievedTotal < f.maxTotal) {
       box.appendChild(el('p', null,
-        'Fairness gave up ' + (f.maxTotal - f.achievedTotal) +
-        ' points on purpose within that band, so no single person was left far behind.'));
+        'Fairness traded ' + fmtNum(f.maxTotal - f.achievedTotal) +
+        ' score on purpose, staying inside that band, to lift the person most in debt.'));
     }
 
     if (f.worstName) {
       box.appendChild(el('p', null,
-        'Furthest from their own ideal this run: ' + f.worstName +
-        (typeof f.worstShortfall === 'number' ? ' (short by ' + f.worstShortfall + ' points).' : '.')));
+        'Most in debt after this run: ' + f.worstName +
+        (typeof f.worstShortfall === 'number' ? ' (short by ' + fmtPct(f.worstShortfall) + ').' : '.')));
     }
 
     appendBreakerList(box, 'Fairness breaker applied', f.breakerFired);
@@ -1147,24 +1184,31 @@
         above + ' hours have more, up to ' + result.maxCoverage + '.']
     });
 
-    // Fairness: totals, band, and the worst-off person, all in points.
+    // Fairness: totals, band, and the person most in debt, in 80/20 terms.
     var f = result.fairness;
     if (f) {
       var lines = [];
-      lines.push('The best points total this group could theoretically reach is ' + f.maxTotal +
-        '. This schedule awarded ' + f.achievedTotal + ' points' +
+      lines.push('Every person\u2019s round score is 80% their priority dimension and 20% the other ' +
+        'dimension. This schedule scored ' + fmtNum(f.achievedTotal) + ' of a best-possible ' +
+        fmtNum(f.maxTotal) +
         (typeof f.bandPercent === 'number'
-          ? ' \u2014 a deliberate choice kept within a ' + fmtWeight(f.bandPercent) +
+          ? ', a deliberate choice kept within a ' + fmtNum(f.bandPercent) +
             '% band of that best total.' : '.'));
+      if (typeof f.objectiveValue === 'number') {
+        lines.push('The fairness objective value was ' + fmtNum(f.objectiveValue) +
+          ': the engine balances a high overall score against the worst single shortfall, so one person ' +
+          'is never left far behind.');
+      }
       if (f.achievedTotal < f.maxTotal) {
-        lines.push('That means ' + (f.maxTotal - f.achievedTotal) +
-          ' points were given up inside the band so the worst-off person would not be left far behind.');
+        lines.push('That means ' + fmtNum(f.maxTotal - f.achievedTotal) +
+          ' score was traded away inside the band to lift the person most in debt.');
       }
       if (f.worstName) {
-        lines.push('The person furthest from their own ideal this run was ' + f.worstName +
-          (typeof f.worstShortfall === 'number' ? ', short by ' + f.worstShortfall + ' points.' : '.'));
+        lines.push('The person most in debt this run was ' + f.worstName +
+          (typeof f.worstShortfall === 'number' ? ', short by ' + fmtPct(f.worstShortfall) + '.' : '.') +
+          ' They are owed because their satisfaction is the lowest, so fairness leans their way next time.');
       }
-      out.push({ h: 'Fairness and points', text: lines });
+      out.push({ h: 'Fairness and the 80/20 score', text: lines });
 
       if (Array.isArray(f.breakerFired) && f.breakerFired.length) {
         out.push({
@@ -1192,14 +1236,15 @@
         result.score + '. The tie was broken by a ' + t.ruleLabel.toLowerCase() + ' with seed ' + t.seed +
         ', which selected entry #' + (t.chosenIndex + 1) + ' of ' + t.count + ' in a name-sorted list. ' +
         'Change the seed and press Run to redraw; the outcome never depends on the order people are listed.';
+      var tSwing = t.swingNames || [];
       var tInter = (t.interchangeableGroups || []).map(function (g) {
-        return g.filter(function (n) { return t.swingNames.indexOf(n) >= 0; });
+        return g.filter(function (n) { return tSwing.indexOf(n) >= 0; });
       }).filter(function (g) { return g.length > 1; });
       tInter.forEach(function (g) {
         tieText += ' ' + g.join(' and ') + ' entered identical weights, so either could have been the one to fall short.';
       });
-      if (t.swingNames.length) {
-        tieText += ' The assignment changed between the tied schedules for: ' + t.swingNames.join(', ') + '.';
+      if (tSwing.length) {
+        tieText += ' The assignment changed between the tied schedules for: ' + tSwing.join(', ') + '.';
       }
       out.push({ h: 'Tie-break', text: [tieText] });
     }
@@ -1212,7 +1257,7 @@
         h: 'No-work window: ' + p.name,
         text: [p.name + ' may never work between ' + S.DAYS[w.startDay] + ' ' + fmtHour(w.startHour) +
           ' and ' + S.DAYS[w.endDay] + ' ' + fmtHour(w.endHour) + '. Both of ' + p.name +
-          '\u2019s weight lists are flattened to equal points by rule, so they are indifferent and take the ' +
+          '\u2019s weight lists are flattened to equal weights by rule, so they are indifferent and take the ' +
           'leftover shift that keeps the window safe. Their assigned slot is ' + a.slotLetter +
           ' (starting ' + fmtHour(a.slotStart) + '), with rest days ' + a.restDayNames.join('\u2013') + '.']
       });
@@ -1222,14 +1267,18 @@
       var dim = a.priority === 'rest' ? 'rest-day pair' : 'shift slot';
       var other = a.priority === 'rest' ? 'shift slot' : 'rest-day pair';
       var fe = fairnessByName(f, a.name);
-      var text = a.name + ' earned ' + a.priorityPoints + ' points on their priority ' + dim +
-        ' and ' + a.softPoints + ' points on their ' + other + '.';
-      if (fe && typeof fe.ideal === 'number' && fe.ideal > 0) {
-        text += ' Their own ideal total was ' + fe.ideal + ' points, so this run they reached ' +
-          fmtSatisfaction(fe) + ' of it.';
+      var text = a.name + ' reached ' + fmtPct(a.priorityPct) + ' of what they wanted on their priority ' +
+        dim + ' and ' + fmtPct(a.softPct) + ' on their ' + other + '. ' +
+        'Those combine into a round score of ' + fmtPct(a.score) + ' (80% priority, 20% other).';
+      if (fe) {
+        text += ' Their overall satisfaction is ' + fmtSatisfaction(fe) + '.';
+        if (typeof fe.debt === 'number' && fe.debt > 0) {
+          text += ' They carry ' + fmtPct(fe.debt) + ' of debt into the next run, because their ' +
+            'satisfaction is among the lowest.';
+        }
       }
       out.push({
-        h: a.name + ' \u2014 ' + a.priorityPoints + ' priority points',
+        h: a.name + ' \u2014 score ' + fmtPct(a.score),
         text: [text]
       });
     });

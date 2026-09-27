@@ -4,8 +4,8 @@
  * Run with:  node test-stage2.js
  *
  * Section 3 compares the real solver against a slow, unpruned brute-force
- * enumeration over small synthetic cases (reward-only, history absent).
- * Section 4 does the same for the bounded-fairness objective with a small
+ * enumeration over small synthetic cases (raw-total only, history absent).
+ * Section 4 does the same for the debt-weighted pass-2 objective with a small
  * history. The brute force is deliberately independent: it never calls the
  * solver's search, only its public helpers.
  */
@@ -50,11 +50,19 @@ function effManual(person, cfg) {
   for (var j = 0; j < m; j++) rw.push(100 / m);
   return { sw: sw, rw: rw, pri: person.priority };
 }
-function rewardManual(entry, cfg) {
+function maxManual(a) { var m = 0; for (var i = 0; i < a.length; i++) if (a[i] > m) m = a[i]; return m; }
+// The 80/20 round score, computed independently.
+function scoreManual(entry, cfg) {
   var e = effManual(entry.person, cfg);
   var sp = weightManual(e.sw, entry.slotIndex, 'hours');
   var rp = weightManual(e.rw, entry.restDays, 'rest');
-  return e.pri === 'rest' ? 100 * rp + sp : 100 * sp + rp;
+  var priorityPoints = e.pri === 'rest' ? rp : sp;
+  var softPoints = e.pri === 'rest' ? sp : rp;
+  var topP = e.pri === 'rest' ? maxManual(e.rw) : maxManual(e.sw);
+  var topS = e.pri === 'rest' ? maxManual(e.sw) : maxManual(e.rw);
+  var priPct = topP > 0 ? priorityPoints / topP : 1;
+  var softPct = topS > 0 ? softPoints / topS : 1;
+  return 0.8 * priPct + 0.2 * softPct;
 }
 function coverageOkManual(entries, cfg) {
   var counts = new Int16Array(HOURS_PER_WEEK);
@@ -87,7 +95,7 @@ function bruteEnumerate(people, cfg, evalAt) {
         });
       }
       var reward = 0;
-      entries.forEach(function (e) { reward += rewardManual(e, cfg); });
+      entries.forEach(function (e) { reward += scoreManual(e, cfg); });
       evalAt({
         sl: sl.slice(), pr: pr.map(function (p) { return p.slice(); }),
         entries: entries, reward: reward,
@@ -163,6 +171,11 @@ check('maximum coverage is 3', res.maxCoverage === 3);
 check('score is a finite number', typeof res.score === 'number' && isFinite(res.score));
 check('history absent => achieved total equals the exact maximum (no fairness trade)',
   approx(res.score, res.maxTotal, 1e-9));
+check('every round score is within 0..1', res.assignment.every(function (a) {
+  return a.score >= -1e-9 && a.score <= 1 + 1e-9;
+}));
+check('the schedule total is the sum of the people\'s round scores',
+  approx(res.score, res.assignment.reduce(function (s, a) { return s + a.score; }, 0), 1e-9));
 
 var below = 0;
 res.grid.forEach(function (row) { row.forEach(function (v) { if (v < 2) below++; }); });
@@ -178,9 +191,12 @@ check('Daphine is flattened (all effective shift weights equal)',
   S.effectiveWeights(daphPerson, config).shiftWeights.every(function (v) {
     return Math.abs(v - 100 / config.numSlots) < 1e-9;
   }));
+check('Daphine (window holder) scores exactly 1.0',
+  daph && approx(daph.score, 1, 1e-9));
 
 var ENTRY_FIELDS = ['name', 'slotIndex', 'slotLetter', 'slotStart', 'restDays',
-  'restDayNames', 'priority', 'slotPoints', 'restPoints', 'priorityPoints', 'softPoints'];
+  'restDayNames', 'priority', 'slotPoints', 'restPoints', 'priorityPoints',
+  'softPoints', 'priorityPct', 'softPct', 'score'];
 var shapeProblem = null;
 res.assignment.forEach(function (a) {
   var keys = Object.keys(a).sort();
@@ -198,7 +214,8 @@ res.assignment.forEach(function (a) {
     '  ' + fmtHour(a.slotStart) + '-' + fmtHour((a.slotStart + config.shiftLen) % 24) +
     '   rest ' + a.restDayNames.join('-') +
     '   priority=' + a.priority +
-    '  points=' + a.priorityPoints + '/' + a.softPoints);
+    '  pct=' + a.priorityPct.toFixed(3) + '/' + a.softPct.toFixed(3) +
+    '  score=' + a.score.toFixed(3));
 });
 
 // =====================================================================
@@ -210,10 +227,10 @@ eq('total person-hours = 8 * 5 * 9 = 360', tot, 360);
 check('min = 2 and max = 3 are the only values', mn === 2 && mx === 3);
 
 // =====================================================================
-console.log('\n3. Shortcut safety: real solver vs dumb brute force (reward only)');
+console.log('\n3. Shortcut safety: real solver vs dumb brute force (raw total)');
 console.log('   The brute force enumerates ALL slot permutations and ALL 7 rest');
-console.log('   pairs per person, checks coverage and windows, and uses effective');
-console.log('   (flattened) weights. No pruning or ordering shortcuts.');
+console.log('   pairs per person, checks coverage and windows, and uses the exact');
+console.log('   80/20 round score. No pruning or ordering shortcuts.');
 // =====================================================================
 
 var cases = [
@@ -258,41 +275,40 @@ cases.forEach(function (c) {
 });
 
 // =====================================================================
-console.log('\n4. Bounded-fairness objective vs brute force (small history)');
+console.log('\n4. Debt-weighted pass-2 objective vs brute force (small history)');
 // =====================================================================
-var fc = makeCase(21, { label: 'fairness case',
-  cfg: { shiftLen: 24, stagger: 8, minCoverage: 0, numSlots: 3 }, count: 3 });
+var fc = makeCase(13, { label: 'fairness case',
+  cfg: { shiftLen: 24, stagger: 8, minCoverage: 1, numSlots: 3 }, count: 3 });
 var run1 = S.solve(fc.people, fc.cfg, {});
 check('fairness case run 1 succeeds', run1.ok === true);
 var history = S.appendHistory(null, S.buildRunRecord(run1.assignment, fc.people));
 var pre = S.computeFairness(history, fc.people);
+check('the history produced some debt', pre.hasDebt === true);
 
-var LAM = S.FAIRNESS_LAMBDA, BAND = S.FAIRNESS_BAND;
+var BAND = S.FAIRNESS_BAND;
 var maxTotal = S.solve(fc.people, fc.cfg, {}).maxTotal;
 var bandFloor = (1 - BAND) * maxTotal;
 
-var bruteBest = -Infinity, bruteReward = -Infinity;
+var bruteBestObj = -Infinity, bruteBestRaw = -Infinity;
 bruteEnumerate(fc.people, fc.cfg, function (c) {
   if (!c.coverageOk || !c.windowsOk) return;
   if (c.reward < bandFloor - 1e-9) return;
-  var worst = -Infinity;
+  var obj = 0;
   for (var i = 0; i < fc.people.length; i++) {
-    var ideal = pre.ideals[i];
-    var rounds = pre.pastRounds[i] + 1;
-    var sat = ideal <= 0 ? 1 : (pre.pastPoints[i] + rewardManual(c.entries[i], fc.cfg)) / (ideal * rounds);
-    var sh = 1 - sat;
-    if (sh > worst) worst = sh;
+    obj += pre.personWeight[i] * scoreManual(c.entries[i], fc.cfg);
   }
-  var obj = c.reward - LAM * worst;
-  if (obj > bruteBest) { bruteBest = obj; bruteReward = c.reward; }
+  if (obj > bruteBestObj) { bruteBestObj = obj; bruteBestRaw = c.reward; }
 });
 
 var fairRes = S.solve(fc.people, fc.cfg, { history: history });
-var solverObj = fairRes.score - LAM * fairRes.fairness.worstShortfall;
 check('fairness result succeeds', fairRes.ok === true);
-check('fairness objective agrees with brute force (' + solverObj.toFixed(3) + ' vs ' + bruteBest.toFixed(3) + ')',
-  approx(solverObj, bruteBest, 1e-4));
-check('fairness total clears the band floor (' + fairRes.score.toFixed(2) + ' >= ' + bandFloor.toFixed(2) + ')',
+check('pass-2 objective agrees with brute force (' + fairRes.fairness.objectiveValue.toFixed(4) +
+  ' vs ' + bruteBestObj.toFixed(4) + ')',
+  approx(fairRes.fairness.objectiveValue, bruteBestObj, 1e-6));
+check('pass-2 raw total agrees with brute force (' + fairRes.score.toFixed(4) +
+  ' vs ' + bruteBestRaw.toFixed(4) + ')',
+  approx(fairRes.score, bruteBestRaw, 1e-6));
+check('fairness total clears the band floor (' + fairRes.score.toFixed(4) + ' >= ' + bandFloor.toFixed(4) + ')',
   fairRes.score >= bandFloor - 1e-9);
 check('fairness never exceeds the exact maximum', fairRes.score <= maxTotal + 1e-9);
 
@@ -306,7 +322,7 @@ check('fresh history produces no breaker guarantees',
 
 var seeded = { version: S.HISTORY_VERSION, runs: [], fingerprints: {}, breaker: {} };
 fc.people.forEach(function (p) { seeded.breaker[p.name] = { worstStreak: S.BREAKER_STREAK }; });
-var seededRes = S.solve(fc.people, fc.cfg, { history: seeded, fairnessLambda: 0 });
+var seededRes = S.solve(fc.people, fc.cfg, { history: seeded, fairnessMu: 0 });
 check('seeded tripped breaker is reported as fired or dropped',
   (seededRes.fairness.breakerFired.length + seededRes.fairness.breakerDropped.length) === fc.people.length);
 seededRes.fairness.breakerDropped.forEach(function (b) {

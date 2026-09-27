@@ -1,6 +1,6 @@
 /* test-stage4.js
  *
- * Node-only multi-round fairness / calibration tests. No DOM, no browser.
+ * Node-only multi-round debt / fairness / breaker tests. No DOM, no browser.
  * Run with:  node test-stage4.js
  *
  * It drives the same run sequence the app uses:
@@ -9,12 +9,13 @@
  * Checks:
  *   (a) hard coverage + no-work windows hold every round;
  *   (b) reproducibility (same inputs -> same output);
- *   (c) fairness lifts the bottom person across rounds vs a lambda=0 control,
- *       and the awarded total stays inside the band;
- *   (d) the circuit breaker fires for a persistent worst-off person and then
- *       resets (or carries when its guarantee is infeasible);
+ *   (c) the raw total stays inside the band every round;
+ *   (d) rotation debt lifts the bottom person smoothly and no one is left
+ *       permanently far behind;
  *   (e) a window holder stays at ~100% satisfaction and never trips;
- *   (f) a preference change (new fingerprint) resets that person's history.
+ *   (f) a preference change (new fingerprint) resets that person's history;
+ *   (g) the circuit breaker fires on a deliberately extreme contested case
+ *       and then resets (or carries when its guarantee is infeasible).
  */
 
 'use strict';
@@ -67,25 +68,19 @@ function windowsOk(result, people) {
   return problems;
 }
 
-// Per-run worst-off person, computed the same way the breaker's streak scan
-// does: the largest one-round shortfall (points/ideal, ideal<=0 counts as 1).
-function perRunWorstName(record) {
-  var worst = -Infinity, name = null;
-  (record.entries || []).forEach(function (e) {
-    var ideal = (typeof e.ideal === 'number') ? e.ideal : 0;
-    var sat = (ideal <= 0) ? 1 : (e.points / ideal);
-    var sh = 1 - sat;
-    if (sh > worst + 1e-9) { worst = sh; name = e.name; }
-  });
-  return name;
-}
-
-function minSatisfaction(history, people) {
-  var f = S.computeFairness(history, people);
+// Bottom (lowest) cumulative satisfaction in a post-run fairness block.
+function bottomOf(fairness) {
   var mn = Infinity, who = null;
-  f.entries.forEach(function (e) {
+  fairness.entries.forEach(function (e) {
     if (e.satisfaction < mn) { mn = e.satisfaction; who = e.name; }
   });
+  return { sat: mn, name: who };
+}
+
+function finalFairness(history, people) {
+  var f = S.computeFairness(JSON.parse(JSON.stringify(history)), people, config, S.FAIRNESS_MU);
+  var mn = Infinity, who = null;
+  f.entries.forEach(function (e) { if (e.satisfaction < mn) { mn = e.satisfaction; who = e.name; } });
   return { min: mn, who: who, fairness: f };
 }
 
@@ -102,70 +97,78 @@ var contested = [
   { name: 'P7', shiftWeights: [36, 58, 35, 81, 100, 72, 74, 77], restWeights: [97, 19, 59, 15, 17, 31, 72], priority: 'hours', noWorkWindow: null }
 ];
 
-console.log('Stage 4 tests — multi-round fairness / calibration\n');
+console.log('Stage 4 tests — multi-round rotation debt / calibration\n');
 console.log('Calibration in use:');
-console.log('  FAIRNESS_LAMBDA        = ' + S.FAIRNESS_LAMBDA);
-console.log('  FAIRNESS_BAND          = ' + S.FAIRNESS_BAND + '  (' + (S.FAIRNESS_BAND * 100).toFixed(1) + '% of the best total)');
+console.log('  SPLIT_PRIORITY         = ' + S.SPLIT_PRIORITY + ' + SPLIT_SOFT ' + S.SPLIT_SOFT);
+console.log('  FAIRNESS_MU            = ' + S.FAIRNESS_MU + '  (personWeight = 1 + MU*debt)');
+console.log('  FAIRNESS_BAND          = ' + S.FAIRNESS_BAND + '  (' + (S.FAIRNESS_BAND * 100).toFixed(1) + '% of the best raw total)');
 console.log('  DECAY_HALF_LIFE        = ' + S.DECAY_HALF_LIFE);
 console.log('  BREAKER_STREAK         = ' + S.BREAKER_STREAK);
-console.log('  BREAKER_GAP            = ' + S.BREAKER_GAP + '  (' + (S.BREAKER_GAP * 100).toFixed(0) + ' points)');
+console.log('  BREAKER_GAP            = ' + S.BREAKER_GAP + '  (' + (S.BREAKER_GAP * 100).toFixed(0) + ' score points)');
 console.log('  BREAKER_RATIO          = ' + S.BREAKER_RATIO + 'x the next-worst shortfall');
 console.log('  BREAKER_MIN_SHORTFALL  = ' + S.BREAKER_MIN_SHORTFALL);
 
 // =====================================================================
-console.log('\n1. Default dataset — app run sequence (8 rounds)');
+console.log('\n1. Default dataset — app run sequence (10 rounds)');
 // =====================================================================
 var people = clonePeople(S.defaultPeople);
 var history = null;
-var rounds = 8;
+var rounds = 10;
 var roundResults = [];
 var roundKeys = [];
-var perRoundWorst = [];
-var allCoverage = true, allWindows = true;
+var bottomSeq = [];
+var bottomNames = [];
+var allCoverage = true, allWindows = true, allInBand = true;
+var maxLossPct = 0;
 for (var r = 0; r < rounds; r++) {
   var res = S.solve(people, config, { history: history });
   if (!res.ok) { check('round ' + (r + 1) + ' succeeds', false, res.error); break; }
   if (!coverageOk(res)) allCoverage = false;
   if (windowsOk(res, people).length) allWindows = false;
-  var rec = S.buildRunRecord(res.assignment, people);
+  var floor = (1 - S.FAIRNESS_BAND) * res.maxTotal;
+  if (res.score < floor - 1e-6) allInBand = false;
+  var loss = (res.maxTotal - res.score) / res.maxTotal;
+  if (loss > maxLossPct) maxLossPct = loss;
+  var b = bottomOf(res.fairness);
+  bottomSeq.push(b.sat);
+  bottomNames.push(b.name);
   roundResults.push(res);
   roundKeys.push(scheduleKey(res.assignment));
-  perRoundWorst.push(perRunWorstName(rec));
-  history = S.appendHistory(history, rec);
+  history = S.appendHistory(history, S.buildRunRecord(res.assignment, people));
 }
 check('all ' + rounds + ' rounds succeeded', roundResults.length === rounds);
 check('(a) coverage >= ' + config.minCoverage + ' every round', allCoverage);
 check('(a) no-work windows respected every round', allWindows);
+check('(c) every round stays inside the band', allInBand,
+  'worst loss ' + (maxLossPct * 100).toFixed(2) + '%');
+console.log('  observed worst-round raw cost: ' + (maxLossPct * 100).toFixed(2) + '% (band ' +
+  (S.FAIRNESS_BAND * 100).toFixed(0) + '%)');
 
-// (g) default-dataset recalibrated breaker: from a clean history the first
-// three rounds are the ordinary schedule; at round 4 Inah fires, is hard
-// guaranteed her highest-weighted slot (E, 12:00), and the worst-off rotates.
-var inah = S.defaultPeople.filter(function (p) { return p.name === 'Inah'; })[0];
-var inahTopSlot = S.topOptionIndex ? S.topOptionIndex(inah.shiftWeights) : inah.shiftWeights.indexOf(Math.max.apply(null, inah.shiftWeights));
-check('(g) rounds 1-3 are the same ordinary schedule',
-  roundKeys.length >= 3 && roundKeys[0] === roundKeys[1] && roundKeys[0] === roundKeys[2]);
-check('(g) round 4 schedule differs from rounds 1-3',
-  roundKeys.length >= 4 && roundKeys[3] !== roundKeys[0]);
-var fired4 = (roundResults[3] && roundResults[3].fairness.breakerFired) || [];
-var inahFire = fired4.filter(function (b) { return b.name === 'Inah'; })[0];
-check('(g) round 4 breakerFired includes Inah', !!inahFire,
-  'fired=' + JSON.stringify(fired4.map(function (b) { return b.name; })));
-check('(g) Inah fires on the slot dimension', !!inahFire && inahFire.dimension === 'slot');
-check('(g) Inah\'s guaranteed slot is her top pick (E = index ' + inahTopSlot + ')',
-  !!inahFire && inahFire.value === inahTopSlot);
-var inahRound4 = (roundResults[3] && roundResults[3].assignment.filter(function (a) { return a.name === 'Inah'; })[0]);
-check('(g) Inah is on slot E starting 12:00 in round 4',
-  !!inahRound4 && inahRound4.slotLetter === 'E' && inahRound4.slotStart === 12,
-  inahRound4 ? (inahRound4.slotLetter + ' @ ' + inahRound4.slotStart) : 'missing');
-var laterWorstChange = roundResults.slice(4).some(function (res) {
-  return res.fairness.worstName && res.fairness.worstName !== 'Inah';
-});
-check('(g) a later round reflects a change of the worst-off', laterWorstChange);
-console.log('  per-round worst-off (one-round): ' + perRoundWorst.join(', '));
-console.log('  per-round cumulative worst:      ' + roundResults.map(function (res) { return res.fairness.worstName; }).join(', '));
+// (d) Rotation debt lifts the bottom smoothly and does not strand anyone.
+// bottomSeq[r] is the minimum cumulative satisfaction right after round r+1.
+var distinctBottoms = {};
+bottomNames.forEach(function (n) { distinctBottoms[n] = true; });
+check('(d) the run starts with a clear bottom person (sat ' + bottomSeq[0].toFixed(3) + ' < 0.76)',
+  bottomSeq[0] < 0.76);
+check('(d) the bottom is lifted by round 3 (' + bottomSeq[0].toFixed(3) + ' -> ' + bottomSeq[2].toFixed(3) + ')',
+  bottomSeq[2] > bottomSeq[0] + 0.05);
+var lateBottom = 0;
+for (var lb = 4; lb < bottomSeq.length; lb++) lateBottom += bottomSeq[lb];
+lateBottom /= (bottomSeq.length - 4);
+check('(d) later rounds hold the bottom up (avg ' + lateBottom.toFixed(3) + ' > ' + (bottomSeq[0] + 0.04).toFixed(3) + ')',
+  lateBottom > bottomSeq[0] + 0.04);
+var finalMin = bottomOf(roundResults[roundResults.length - 1].fairness).sat;
+check('(d) no one is left permanently low (final bottom ' + finalMin.toFixed(3) + ' >= 0.70)',
+  finalMin >= 0.70);
+check('(d) the worst-off rotates (distinct people: ' + Object.keys(distinctBottoms).join(', ') + ')',
+  Object.keys(distinctBottoms).length >= 2);
+console.log('  per-round worst-off (post-run):  ' + bottomNames.join(', '));
+console.log('  per-round bottom satisfaction:   ' + bottomSeq.map(function (v) { return v.toFixed(3); }).join(', '));
 console.log('  per-round breaker fired:         ' + roundResults.map(function (res, i) {
   return (i + 1) + ':' + (res.fairness.breakerFired.length ? res.fairness.breakerFired.map(function (b) { return b.name; }).join('+') : '-');
 }).join(', '));
+check('(g) breaker stays rare on the calm default team (never fires)',
+  roundResults.every(function (res) { return res.fairness.breakerFired.length === 0; }));
 
 // (e) window holder stays at ~100% satisfaction and never trips.
 var daph = S.defaultPeople.filter(function (p) { return p.noWorkWindow; })[0];
@@ -176,7 +179,6 @@ roundResults.forEach(function (res) {
   res.fairness.breakerFired.forEach(function (b) { if (b.name === daph.name) daphAlwaysPerfect = false; });
 });
 check('(e) window holder ' + daph.name + ' stays at ~100% satisfaction every round', daphAlwaysPerfect);
-var finalDefault = minSatisfaction(history, people);
 check('(e) window holder never trips the breaker (streak stays 0)',
   !history.breaker[daph.name] || history.breaker[daph.name].worstStreak === 0);
 
@@ -190,12 +192,12 @@ check('(b) two identical runs give the same schedule',
 
 // (f) preference edit resets only that person's history.
 var before = {};
-S.computeFairness(history, people).entries.forEach(function (e) { before[e.name] = e.lifetimePoints; });
+S.computeFairness(JSON.parse(JSON.stringify(history)), people).entries.forEach(function (e) { before[e.name] = e.rounds; });
 var edited = clonePeople(people);
 edited[0].shiftWeights[0] = edited[0].shiftWeights[0] + 1; // new fingerprint for Cindy
 var afterHist = JSON.parse(JSON.stringify(history));
 var after = {};
-S.computeFairness(afterHist, edited).entries.forEach(function (e) { after[e.name] = e.lifetimePoints; });
+S.computeFairness(afterHist, edited).entries.forEach(function (e) { after[e.name] = e.rounds; });
 check('(f) edited person\'s history is reset to zero',
   approx(after[edited[0].name], 0, 1e-9), edited[0].name + '=' + after[edited[0].name]);
 var untouched = Object.keys(before).filter(function (n) { return n !== edited[0].name; })
@@ -203,76 +205,71 @@ var untouched = Object.keys(before).filter(function (n) { return n !== edited[0]
 check('(f) everyone else\'s history is untouched', untouched);
 
 // =====================================================================
-console.log('\n2. Contested dataset — fairness lifts the bottom vs lambda=0 control');
+console.log('\n2. Contested dataset — rotation debt lifts the bottom vs a MU=0 control');
 // =====================================================================
-// This section isolates the effect of the fairness lambda, so the breaker is
-// switched off here (it is exercised separately in section 3). Otherwise the
-// lambda=0 control also gets breaker relief and the comparison is confounded.
-function simulate(ppl, lam, band, nRounds) {
+function simulate(ppl, mu, nRounds) {
   var h = null;
-  var out = { worst: [], total: [], maxTotal: [], fired: 0 };
+  var out = { bottom: [], total: [], maxTotal: [], fired: 0 };
   for (var i = 0; i < nRounds; i++) {
-    var solveHist = h ? JSON.parse(JSON.stringify(h)) : null;
-    if (solveHist) solveHist.breaker = {};
-    var res = S.solve(ppl, config, { history: solveHist, fairnessLambda: lam, fairnessBand: band });
+    var res = S.solve(ppl, config, { history: h, fairnessMu: mu });
     if (!res.ok) break;
     h = S.appendHistory(h, S.buildRunRecord(res.assignment, ppl));
-    out.worst.push(res.fairness.worstShortfall);
+    out.bottom.push(res.fairness.worstShortfall);
     out.total.push(res.score);
     out.maxTotal.push(res.maxTotal);
     out.fired += res.fairness.breakerFired.length;
   }
-  var end = minSatisfaction(h, ppl);
+  var end = finalFairness(h, ppl);
   out.finalMinSat = end.min;
   out.finalMinWho = end.who;
   return out;
 }
 
-var ctrl = simulate(clonePeople(contested), 0, S.FAIRNESS_BAND, 10);
-var fair = simulate(clonePeople(contested), S.FAIRNESS_LAMBDA, S.FAIRNESS_BAND, 10);
+var ctrl = simulate(clonePeople(contested), 0, 10);
+var fair = simulate(clonePeople(contested), S.FAIRNESS_MU, 10);
 check('contested control simulation completed', ctrl.total.length === 10);
 check('contested fairness simulation completed', fair.total.length === 10);
 
 console.log('  control final bottom: ' + ctrl.finalMinWho + ' at ' + ctrl.finalMinSat.toFixed(3));
 console.log('  fairness final bottom: ' + fair.finalMinWho + ' at ' + fair.finalMinSat.toFixed(3));
-check('(c) fairness lifts the bottom person (' + ctrl.finalMinSat.toFixed(3) + ' -> ' + fair.finalMinSat.toFixed(3) + ')',
+check('(c) rotation debt lifts the bottom person (' + ctrl.finalMinSat.toFixed(3) + ' -> ' + fair.finalMinSat.toFixed(3) + ')',
   fair.finalMinSat > ctrl.finalMinSat + 0.05);
 
-var inBand = true, maxLossPct = 0;
-for (var i = 0; i < fair.total.length; i++) {
-  var floor = (1 - S.FAIRNESS_BAND) * fair.maxTotal[i];
-  if (fair.total[i] < floor - 1e-6) inBand = false;
-  var loss = (fair.maxTotal[i] - fair.total[i]) / fair.maxTotal[i];
-  if (loss > maxLossPct) maxLossPct = loss;
+var inBand = true, cMaxLoss = 0;
+for (var ci = 0; ci < fair.total.length; ci++) {
+  var cfloor = (1 - S.FAIRNESS_BAND) * fair.maxTotal[ci];
+  if (fair.total[ci] < cfloor - 1e-6) inBand = false;
+  var closs = (fair.maxTotal[ci] - fair.total[ci]) / fair.maxTotal[ci];
+  if (closs > cMaxLoss) cMaxLoss = closs;
 }
 check('(c) every fairness round stays inside the band', inBand);
-console.log('  observed worst-round reward cost: ' + (maxLossPct * 100).toFixed(2) + '% (band ' +
+console.log('  observed worst-round reward cost: ' + (cMaxLoss * 100).toFixed(2) + '% (band ' +
   (S.FAIRNESS_BAND * 100).toFixed(0) + '%)');
 
 // =====================================================================
-console.log('\n3. Circuit breaker — fires, resets, carries');
+console.log('\n3. Circuit breaker — fires on an extreme contested case, then resets/carries');
 // =====================================================================
-// Deterministic lambda=0 run: the same person is the unique worst-off for
-// three consecutive rounds, so the breaker fires on the fourth.
+// With debt deliberately switched off (MU=0), the same person is the unique
+// dramatic worst-off for three consecutive rounds, so the breaker fires on the
+// fourth and hands them their top priority pick.
 var bp = clonePeople(contested);
 var bh = null;
 var fireRound = -1, firedName = null, firedValue = null;
 var streakAfterFire = null, worstWhoSeq = [];
 for (var rr = 1; rr <= 6; rr++) {
-  var bres = S.solve(bp, config, { history: bh, fairnessLambda: 0 });
+  var bres = S.solve(bp, config, { history: bh, fairnessMu: 0 });
   if (!bres.ok) break;
   worstWhoSeq.push(bres.fairness.worstName);
-  var prevStreak = bh && bh.breaker && bh.breaker[bres.fairness.worstName]
-    ? bh.breaker[bres.fairness.worstName].worstStreak : 0;
   bh = S.appendHistory(bh, S.buildRunRecord(bres.assignment, bp));
   if (bres.fairness.breakerFired.length && fireRound < 0) {
     fireRound = rr;
     firedName = bres.fairness.breakerFired[0].name;
     firedValue = bres.fairness.breakerFired[0].value;
     var entry = bres.assignment.filter(function (a) { return a.name === firedName; })[0];
-    check('(d) firing round gives the guaranteed top priority pick to ' + firedName,
-      S.weightOf(S.effectiveWeights(bres.assignment.filter(function (a) { return a.name === firedName; })[0].person || bp.filter(function (p) { return p.name === firedName; })[0], config).shiftWeights, entry.slotIndex, 'hours') ===
-      Math.max.apply(null, bp.filter(function (p) { return p.name === firedName; })[0].shiftWeights));
+    var person = bp.filter(function (p) { return p.name === firedName; })[0];
+    var gotTop = S.weightOf(S.effectiveWeights(person, config).shiftWeights, entry.slotIndex, 'hours') ===
+      Math.max.apply(null, person.shiftWeights);
+    check('(d) firing round gives the guaranteed top priority pick to ' + firedName, gotTop);
     streakAfterFire = bh.breaker[firedName] ? bh.breaker[firedName].worstStreak : null;
   }
 }
@@ -289,7 +286,7 @@ var carryHist = {
   version: S.HISTORY_VERSION, runs: [], fingerprints: {},
   breaker: { P0: { worstStreak: S.BREAKER_STREAK }, P4: { worstStreak: S.BREAKER_STREAK } }
 };
-var carryRes = S.solve(contested, config, { history: carryHist, fairnessLambda: 0 });
+var carryRes = S.solve(contested, config, { history: carryHist, fairnessMu: 0 });
 check('(d) carry case: exactly one of the conflicting guarantees fires',
   carryRes.fairness.breakerFired.length === 1);
 check('(d) carry case: the other is dropped with a reason',

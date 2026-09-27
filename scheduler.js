@@ -5,13 +5,21 @@
  * Zero DOM dependencies. This file runs unchanged under plain Node
  * (via require) and in the browser (as a global `Scheduler`).
  *
- * This is the "v2" engine: weighted 0..100 points, an open candidate
- * domain, per-person no-work windows (which flatten that person's own
- * preference weights to equal values), cumulative recency-weighted
- * fairness, an exact bounded-fairness objective, a running champion with
- * exact tie handling, and a circuit breaker for persistently worst-off
- * people. Everything is solved by an exhaustive generator search so it
- * can be time-sliced in the browser.
+ * This is the "v3" engine:
+ *   - 80/20 category-percentage scoring: each person's round score is
+ *     0.8 * (priority points / their top priority weight) +
+ *     0.2 * (soft points / their top soft weight), so every person's ideal
+ *     round is exactly 1.0 and the total is 0..nPeople.
+ *   - rotation debt: satisfaction is the recency-weighted average of past
+ *     round scores; a person's weight is 1 + MU * (1 - satisfaction).
+ *   - bounded fairness: pass 1 finds the exact maximum raw total under hard
+ *     constraints; pass 2 maximises the weighted total subject to staying
+ *     within a band of that maximum.
+ *   - a rare circuit-breaker floor for a persistently unique worst-off
+ *     person, outside the band.
+ *
+ * Everything is solved by an exhaustive generator search so it can be
+ * time-sliced in the browser.
  */
 
 (function (root) {
@@ -32,11 +40,10 @@
   // aligned to this order (Mon-Tue ... Sun-Mon).
   var ADJACENT_PAIRS = [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [5, 6], [6, 0]];
 
-  // A person's priority dimension counts this much more heavily than the
-  // other. Points are the 0..100 values from weighted.txt, so HIGHER total
-  // reward is BETTER.
-  var PRIORITY_WEIGHT = 100;
-  var SOFT_WEIGHT = 1;
+  // 80/20 category split. A person's priority dimension counts this share of
+  // their round score, the other dimension the rest. They sum to 1.
+  var SPLIT_PRIORITY = 0.8;
+  var SPLIT_SOFT = 0.2;
 
   var DEFAULT_TIE_SEED = 1;
 
@@ -44,16 +51,16 @@
   // Fairness tunables (exposed for tests/tools; calibrated in test-stage4)
   // ---------------------------------------------------------------------
 
-  var FAIRNESS_LAMBDA = 50000;    // how hard to pull the worst-off person up
-  var FAIRNESS_BAND = 0.10;       // allowed reward loss, as a fraction of max
+  var FAIRNESS_MU = 50;           // how hard to pull a low-satisfaction person up
+  var FAIRNESS_BAND = 0.10;       // allowed raw-total loss, as a fraction of max
   var DECAY_HALF_LIFE = 3;        // rounds after which a past run's weight halves
 
   var BREAKER_STREAK = 3;         // consecutive unique-dramatic-worst rounds
-  var BREAKER_GAP = 0.10;         // shortfall lead (10 points) over next-worst
+  var BREAKER_GAP = 0.20;         // shortfall lead over the next-worst person
   var BREAKER_RATIO = 3;          // OR at least 3x the next-worst shortfall
-  var BREAKER_MIN_SHORTFALL = 0.05; // floor so trivial gaps never trip
+  var BREAKER_MIN_SHORTFALL = 0.20; // floor so trivial gaps never trip
 
-  var HISTORY_VERSION = 2;
+  var HISTORY_VERSION = 3;
   var MAX_HISTORY_RUNS = 50;
 
   // Exact subset enumeration of simultaneous breaker guarantees is used up to
@@ -164,6 +171,11 @@
       if (arr[i] > m) m = arr[i];
     }
     return m;
+  }
+
+  function topOf(arr) {
+    var m = maxOf(arr);
+    return (m === -Infinity || m < 0) ? 0 : m;
   }
 
   // Index of the largest value in a weights array, or -1 when nothing is
@@ -313,8 +325,21 @@
   }
 
   // ---------------------------------------------------------------------
-  // Scoring
+  // Scoring: the 80/20 category-percentage model
   // ---------------------------------------------------------------------
+  //
+  // For a person:
+  //   topP = the largest weight on their priority dimension
+  //   topS = the largest weight on the other dimension
+  //   priorityPct = topP > 0 ? priorityPoints / topP : 1
+  //   softPct     = topS > 0 ? softPoints     / topS : 1
+  //   roundScore  = 0.8 * priorityPct + 0.2 * softPct
+  // which is exactly 1.0 when they get their own top pick on both dimensions
+  // (and always 1.0 for a flattened window-holder). HIGHER is BETTER.
+  //
+  // Because topP/topS are fixed per person per round, roundScore is a linear
+  // function of the slot points and rest points, so the whole objective is
+  // additive (separable) across people.
 
   function weightOf(weightsArray, value, kind) {
     weightsArray = weightsArray || [];
@@ -332,24 +357,64 @@
     return typeof v === 'number' ? v : 0;
   }
 
-  // Weighted reward for one person/assignment. Uses effective weights.
-  function personReward(person, slotIndex, restDays, cfg) {
+  // Per-person scoring coefficients derived from the effective weights.
+  // roundScore = baseConst + slotCoef * slotPoints + restCoef * restPoints.
+  function personCoeffs(person, cfg) {
     var e = effectiveWeights(person, cfg);
-    var sp = weightOf(e.shiftWeights, slotIndex, 'hours');
-    var rp = weightOf(e.restWeights, restDays, 'rest');
+    var topShift = topOf(e.shiftWeights);
+    var topRest = topOf(e.restWeights);
+    var priTop = (person.priority === 'rest') ? topRest : topShift;
+    var softTop = (person.priority === 'rest') ? topShift : topRest;
+
+    var priCoef = priTop > 0 ? SPLIT_PRIORITY / priTop : 0;
+    var priConst = priTop > 0 ? 0 : SPLIT_PRIORITY;
+    var softCoef = softTop > 0 ? SPLIT_SOFT / softTop : 0;
+    var softConst = softTop > 0 ? 0 : SPLIT_SOFT;
+
+    var slotCoef, restCoef;
     if (person.priority === 'rest') {
-      return PRIORITY_WEIGHT * rp + SOFT_WEIGHT * sp;
+      slotCoef = softCoef;
+      restCoef = priCoef;
+    } else {
+      slotCoef = priCoef;
+      restCoef = softCoef;
     }
-    return PRIORITY_WEIGHT * sp + SOFT_WEIGHT * rp;
+
+    return {
+      baseConst: priConst + softConst,
+      slotCoef: slotCoef,
+      restCoef: restCoef,
+      priTop: priTop,
+      softTop: softTop,
+      topShift: topShift,
+      topRest: topRest,
+      windowed: !!person.noWorkWindow
+    };
   }
 
+  function scoreFromCoeffs(co, slotPoints, restPoints) {
+    return co.baseConst + co.slotCoef * slotPoints + co.restCoef * restPoints;
+  }
+
+  // Category percentages for one assignment detail.
+  function percentOf(person, co, slotPoints, restPoints) {
+    var priorityPoints = (person.priority === 'rest') ? restPoints : slotPoints;
+    var softPoints = (person.priority === 'rest') ? slotPoints : restPoints;
+    var priorityPct = co.priTop > 0 ? priorityPoints / co.priTop : 1;
+    var softPct = co.softTop > 0 ? softPoints / co.softTop : 1;
+    return {
+      priorityPoints: priorityPoints,
+      softPoints: softPoints,
+      priorityPct: priorityPct,
+      softPct: softPct
+    };
+  }
+
+  // Sum of roundScore over the people in `assignment` (0..nPeople).
+  // Each entry must carry `person`.
   function scoreAssignment(assignment, cfg, opts) {
     cfg = cfg || config;
-    opts = opts || {};
-    var pw = typeof opts.priorityWeight === 'number' ? opts.priorityWeight : PRIORITY_WEIGHT;
-    var sw = typeof opts.softWeight === 'number' ? opts.softWeight : SOFT_WEIGHT;
     var entries = Array.isArray(assignment) ? assignment : (assignment.entries || []);
-
     var total = 0;
     for (var i = 0; i < entries.length; i++) {
       var entry = entries[i];
@@ -358,25 +423,9 @@
       var e = effectiveWeights(p, cfg);
       var slotPoints = weightOf(e.shiftWeights, entry.slotIndex, 'hours');
       var restPoints = weightOf(e.restWeights, entry.restDays, 'rest');
-      if (p.priority === 'rest') {
-        total += pw * restPoints + sw * slotPoints;
-      } else {
-        total += pw * slotPoints + sw * restPoints;
-      }
+      total += scoreFromCoeffs(personCoeffs(p, cfg), slotPoints, restPoints);
     }
     return total;
-  }
-
-  // A person's personal ideal per round: their top priority-dimension weight
-  // (weighted heavily) plus their top other-dimension weight (lightly).
-  function idealOf(person, cfg) {
-    var e = effectiveWeights(person, cfg);
-    var st = maxOf(e.shiftWeights);
-    var rt = maxOf(e.restWeights);
-    if (person.priority === 'rest') {
-      return PRIORITY_WEIGHT * rt + SOFT_WEIGHT * st;
-    }
-    return PRIORITY_WEIGHT * st + SOFT_WEIGHT * rt;
   }
 
   // Recency weight of a run that is `age` rounds old (current round = 0).
@@ -466,34 +515,16 @@
   // The exhaustive search
   // ---------------------------------------------------------------------
   //
-  // One pass over the open domain. `ctx` carries the objective:
-  //   fairnessOn=false -> maximise reward (lambda ignored);
-  //   fairnessOn=true  -> maximise reward - lambda * worstShortfall, subject
-  //                       to reward >= bandFloor.
+  // The objective is additive per person, so for a fixed slot permutation the
+  // best rest pairs form a small separable search. `ctx` carries:
+  //   weighted=false, bandFloor=-Infinity  -> pass 1, maximise raw total.
+  //   weighted=true,  bandFloor=<floor>    -> pass 2, maximise
+  //        SUM personWeight * roundScore subject to raw >= floor.
   //
-  // The slot permutation outer loop stays, but pruning is always on the JOINT
-  // admissible bound (reward upper bound minus lambda times a lower bound on
-  // the worst shortfall), never on slot reward alone. At the leaves the rest
-  // search evaluates the JOINT objective, so a lower-reward assignment can
-  // still win.
-
-  function shortfallFor(ctx, i, reward_i) {
-    var ideal = ctx.ideals[i];
-    var rounds = ctx.pastRounds[i] + 1;
-    var sat = (ideal <= 0) ? 1 : (ctx.pastPoints[i] + reward_i) / (ideal * rounds);
-    return 1 - sat;
-  }
-
-  function satisfactionVec(ctx, rewards) {
-    var n = rewards.length;
-    var vec = new Array(n);
-    for (var i = 0; i < n; i++) {
-      var ideal = ctx.ideals[i];
-      var rounds = ctx.pastRounds[i] + 1;
-      vec[i] = (ideal <= 0) ? 1 : (ctx.pastPoints[i] + rewards[i]) / (ideal * rounds);
-    }
-    return vec;
-  }
+  // Bounds are admissible upper bounds on the remaining rest contributions,
+  // so the separable search stays exact. Options are sorted by rest points
+  // descending, and every coefficient is positive, so once a bound fails for
+  // one option every later option fails too and we can `break`.
 
   // Compare two satisfaction vectors "lift the lowest first". Returns >0 when
   // `a` is strictly better.
@@ -507,14 +538,23 @@
     return 0;
   }
 
+  function satisfactionVec(ctx, scores) {
+    var n = scores.length;
+    var vec = new Array(n);
+    for (var i = 0; i < n; i++) {
+      vec[i] = (ctx.satNum[i] + scores[i]) / (ctx.satDen[i] + 1);
+    }
+    return vec;
+  }
+
   // Offer one complete assignment to the running champion.
-  function considerChampion(ctx, slotOf, pairs, reward, satVec, objective) {
+  function considerChampion(ctx, slotOf, pairs, raw, objective, satVec) {
     var champ = ctx.champion;
     if (!champ) {
       ctx.champion = {
         slotOf: slotOf.slice(),
         pairs: pairs.slice(),
-        reward: reward,
+        raw: raw,
         objective: objective,
         sat: satVec,
         count: 1
@@ -528,7 +568,7 @@
       ctx.champion = {
         slotOf: slotOf.slice(),
         pairs: pairs.slice(),
-        reward: reward,
+        raw: raw,
         objective: objective,
         sat: satVec,
         count: 1
@@ -544,7 +584,7 @@
       ctx.champion = {
         slotOf: slotOf.slice(),
         pairs: pairs.slice(),
-        reward: reward,
+        raw: raw,
         objective: objective,
         sat: satVec,
         count: 1
@@ -560,19 +600,24 @@
     if (ctx.rand() < 1 / champ.count) {
       champ.slotOf = slotOf.slice();
       champ.pairs = pairs.slice();
-      champ.reward = reward;
+      champ.raw = raw;
       champ.sat = satVec;
     }
   }
 
-  // Evaluate one full slot assignment: choose rest pairs with the joint
-  // objective. Generator so progress flows through.
+  // Evaluate one full slot assignment: choose rest pairs with the objective.
+  // Generator so progress flows through.
   function* evaluateSlots(ctx, people, slotOf, slots, cfg, prog) {
     var n = people.length;
+    var coeffs = ctx.coeffs;
+    var personWeight = ctx.personWeight;
+    var weighted = ctx.weighted;
+    var bandFloor = ctx.bandFloor;
+
     var opts = new Array(n);
-    var slotConst = new Array(n); // weighted slot contribution per person
-    var restMul = new Array(n);   // multiplier on that person's rest points
-    var bestReward = new Array(n);
+    var slotConst = new Array(n);   // includes base constant + slot contribution
+    var slotWConst = new Array(n);  // personWeight * slotConst
+    var bestScore = new Array(n);
 
     for (var i = 0; i < n; i++) {
       var p = people[i];
@@ -582,14 +627,9 @@
       opts[i] = list;
 
       var sp = weightOf(p.shiftWeights, slotOf[i], 'hours');
-      if (p.priority === 'rest') {
-        slotConst[i] = SOFT_WEIGHT * sp;
-        restMul[i] = PRIORITY_WEIGHT;
-      } else {
-        slotConst[i] = PRIORITY_WEIGHT * sp;
-        restMul[i] = SOFT_WEIGHT;
-      }
-      bestReward[i] = slotConst[i] + restMul[i] * list[0].points;
+      slotConst[i] = coeffs[i].baseConst + coeffs[i].slotCoef * sp;
+      slotWConst[i] = personWeight[i] * slotConst[i];
+      bestScore[i] = slotConst[i] + coeffs[i].restCoef * list[0].points;
     }
 
     // Coverage capacity: how many rest-shifts each hour can absorb.
@@ -605,31 +645,32 @@
       capacity[h] = c;
     }
 
-    var slotConstSum = 0;
-    for (var s = 0; s < n; s++) slotConstSum += slotConst[s];
-
-    // Optimistic joint bound for this whole slot assignment.
-    var rewardOpt = slotConstSum;
-    var Lopt = -Infinity;
-    for (var o = 0; o < n; o++) {
-      rewardOpt += restMul[o] * opts[o][0].points;
-      var msh = shortfallFor(ctx, o, bestReward[o]);
-      if (msh > Lopt) Lopt = msh;
+    var constSum = 0, wConstSum = 0, constSumScore = 0;
+    for (var s = 0; s < n; s++) {
+      constSum += slotConst[s];
+      wConstSum += slotWConst[s];
+      constSumScore += bestScore[s];
     }
-    if (ctx.bandFloor > -Infinity && rewardOpt < ctx.bandFloor - EPS) return;
-    var objOpt = ctx.fairnessOn ? rewardOpt - ctx.lambda * Lopt : rewardOpt;
-    if (ctx.champion && objOpt < ctx.champion.objective - EPS) return;
+
+    // Optimistic bound for this whole slot assignment.
+    var optRaw = constSumScore;
+    var optObj = weighted ? wConstSum : optRaw;
+    if (weighted) {
+      optObj = 0;
+      for (var o = 0; o < n; o++) optObj += personWeight[o] * bestScore[o];
+    }
+    if (bandFloor > -Infinity && optRaw < bandFloor - EPS) return;
+    if (ctx.champion && optObj < ctx.champion.objective - EPS) return;
 
     // Branch-and-bound tables for the rest DFS.
-    var ub = new Array(n + 1);
-    ub[n] = 0;
-    for (var b = n - 1; b >= 0; b--) ub[b] = ub[b + 1] + restMul[b] * opts[b][0].points;
-
-    var suffixMinSh = new Array(n + 1);
-    suffixMinSh[n] = -Infinity;
-    for (var q = n - 1; q >= 0; q--) {
-      var sh = shortfallFor(ctx, q, bestReward[q]);
-      suffixMinSh[q] = Math.max(suffixMinSh[q + 1], sh);
+    var ubScore = new Array(n + 1);
+    var ubObj = new Array(n + 1);
+    ubScore[n] = 0;
+    ubObj[n] = 0;
+    for (var b = n - 1; b >= 0; b--) {
+      var restMax = coeffs[b].restCoef * opts[b][0].points;
+      ubScore[b] = ubScore[b + 1] + restMax;
+      ubObj[b] = ubObj[b + 1] + (weighted ? personWeight[b] : 1) * restMax;
     }
 
     prog.restCombos++;
@@ -638,43 +679,32 @@
     var curPoints = new Array(n);
     var curPairs = new Array(n);
 
-    function* dfs(idx, reward, decidedMaxSh) {
+    function* dfs(idx, raw, obj) {
       if (idx === n) {
         prog.innerChecked++;
-        var objective = ctx.fairnessOn ? reward - ctx.lambda * decidedMaxSh : reward;
-        var rewards = new Array(n);
-        for (var r = 0; r < n; r++) rewards[r] = slotConst[r] + restMul[r] * curPoints[r];
-        var satVec = satisfactionVec(ctx, rewards);
-        considerChampion(ctx, slotOf, curPairs, reward, satVec, objective);
+        if (bandFloor > -Infinity && raw < bandFloor - EPS) return;
+        var scores = new Array(n);
+        for (var r = 0; r < n; r++) {
+          scores[r] = slotConst[r] + coeffs[r].restCoef * curPoints[r];
+        }
+        var satVec = satisfactionVec(ctx, scores);
+        considerChampion(ctx, slotOf, curPairs, raw, obj, satVec);
         return;
       }
 
-      var list = opts[idx];
-      // Admissible joint bound for this subtree.
-      var rewardUB = reward + ub[idx];
-      if (ctx.bandFloor > -Infinity && rewardUB < ctx.bandFloor - EPS) return;
-      var L = Math.max(decidedMaxSh, suffixMinSh[idx]);
-      var objUB = ctx.fairnessOn ? rewardUB - ctx.lambda * L : rewardUB;
-      if (ctx.champion && objUB < ctx.champion.objective - EPS) return;
+      if (bandFloor > -Infinity && raw + ubScore[idx] < bandFloor - EPS) return;
+      if (ctx.champion && obj + ubObj[idx] < ctx.champion.objective - EPS) return;
 
+      var list = opts[idx];
       for (var x = 0; x < list.length; x++) {
         prog.innerChecked++;
         var opt = list[x];
-        var nr = reward + restMul[idx] * opt.points;
-        var childUB = nr + ub[idx + 1];
-        if (ctx.bandFloor > -Infinity && childUB < ctx.bandFloor - EPS) {
-          if (!ctx.fairnessOn) break; // points descend; nothing later can help
-          continue;
-        }
-        if (ctx.champion) {
-          var childMinSh = shortfallFor(ctx, idx, slotConst[idx] + restMul[idx] * opt.points);
-          var childL = Math.max(decidedMaxSh, childMinSh, suffixMinSh[idx + 1]);
-          var childObjUB = ctx.fairnessOn ? childUB - ctx.lambda * childL : childUB;
-          if (childObjUB < ctx.champion.objective - EPS) {
-            if (!ctx.fairnessOn) break; // reward-ordered, so later options are worse
-            continue;
-          }
-        }
+
+        var nraw = raw + coeffs[idx].restCoef * opt.points;
+        var nobj = obj + (weighted ? personWeight[idx] : 1) * coeffs[idx].restCoef * opt.points;
+
+        if (bandFloor > -Infinity && nraw + ubScore[idx + 1] < bandFloor - EPS) break;
+        if (ctx.champion && nobj + ubObj[idx + 1] < ctx.champion.objective - EPS) break;
 
         var hrs = opt.hours;
         var ok = true;
@@ -686,17 +716,13 @@
         for (var a2 = 0; a2 < hrs.length; a2++) removals[hrs[a2]]++;
         curPoints[idx] = opt.points;
         curPairs[idx] = opt.pair;
-        var newDecided = Math.max(
-          decidedMaxSh,
-          shortfallFor(ctx, idx, slotConst[idx] + restMul[idx] * opt.points)
-        );
-        yield* dfs(idx + 1, nr, newDecided);
+        yield* dfs(idx + 1, nraw, nobj);
         for (var u = 0; u < hrs.length; u++) removals[hrs[u]]--;
         yield* yieldTick(prog);
       }
     }
 
-    yield* dfs(0, slotConstSum, -Infinity);
+    yield* dfs(0, constSum, wConstSum);
   }
 
   // One search pass over the whole open domain.
@@ -750,11 +776,11 @@
   }
 
   // ---------------------------------------------------------------------
-  // History / cumulative fairness (version 2)
+  // History / rotation debt (version 3)
   // ---------------------------------------------------------------------
   //
   //   history = {
-  //     version: 2,
+  //     version: 3,
   //     runs: [ runRecord, ... ],
   //     fingerprints: { "<name>": "<pref fingerprint>" },
   //     breaker: { "<name>": { worstStreak: <n> } }
@@ -762,9 +788,13 @@
   //
   //   runRecord = {
   //     at: <ISO string>,
-  //     entries: [ { name, points, slotPoints, restPoints, priorityPoints,
-  //                  softPoints, ideal, windowed } ]
+  //     entries: [ { name, priorityPct, softPct, score, slotPoints,
+  //                  restPoints, priorityPoints, softPoints, windowed } ]
   //   }
+  //
+  // satisfaction_i  = recency-weighted average of past roundScore_i
+  // debt_i          = 1 - satisfaction_i
+  // personWeight_i  = 1 + MU * debt_i
 
   function emptyHistory() {
     return { version: HISTORY_VERSION, runs: [], fingerprints: {}, breaker: {} };
@@ -784,10 +814,11 @@
   }
 
   // Pre-run fairness state. Applies fingerprint resets (mutating history) and
-  // returns per-person cumulative state plus any tripped breaker guarantees.
-  function computeFairness(history, people, cfg) {
+  // returns per-person derived debt plus any tripped breaker guarantees.
+  function computeFairness(history, people, cfg, mu) {
     cfg = cfg || config;
-    history = history || emptyHistory();
+    if (typeof mu !== 'number') mu = FAIRNESS_MU;
+    if (!history || history.version !== HISTORY_VERSION) history = emptyHistory();
     if (!history.runs) history.runs = [];
     if (!history.fingerprints) history.fingerprints = {};
     if (!history.breaker) history.breaker = {};
@@ -820,15 +851,15 @@
     var L = runs.length;
 
     var entries = [];
-    var pastPoints = [];
-    var pastRounds = [];
-    var ideals = [];
+    var satNum = [];
+    var satDen = [];
+    var personWeight = [];
     var worstName = null;
     var worstShortfall = -Infinity;
-    var hasShortfall = false;
+    var hasDebt = false;
 
-    people.forEach(function (p, i) {
-      var lp = 0, rr = 0;
+    people.forEach(function (p) {
+      var num = 0, den = 0;
       for (var r = 0; r < L; r++) {
         var age = L - r; // the current (not-yet-recorded) round is age 0
         var w = recencyWeight(age);
@@ -837,30 +868,31 @@
         for (var e = 0; e < (run.entries || []).length; e++) {
           if (run.entries[e].name === p.name) { found = run.entries[e]; break; }
         }
-        if (found) { lp += w * found.points; rr += w; }
+        if (found && typeof found.score === 'number') { num += w * found.score; den += w; }
       }
-      var ideal = idealOf(p, cfg);
-      var sat = (ideal <= 0 || rr === 0) ? 1 : lp / (ideal * rr);
-      var shortfall = 1 - sat;
-      if (sat < 1 - EPS) hasShortfall = true;
+      var satisfaction = den === 0 ? 1 : num / den;
+      var shortfall = 1 - satisfaction;
+      var debt = 1 - satisfaction;
+      var weight = 1 + mu * debt;
+      if (debt > EPS) hasDebt = true;
       if (shortfall > worstShortfall) { worstShortfall = shortfall; worstName = p.name; }
 
-      pastPoints.push(lp);
-      pastRounds.push(rr);
-      ideals.push(ideal);
+      satNum.push(num);
+      satDen.push(den);
+      personWeight.push(weight);
 
       entries.push({
         name: p.name,
-        lifetimePoints: lp,
-        rounds: rr,
-        satisfaction: sat,
+        satisfaction: satisfaction,
         shortfall: shortfall,
-        ideal: ideal,
+        debt: debt,
+        personWeight: weight,
+        rounds: den,
         windowed: !!p.noWorkWindow
       });
     });
 
-    // Tripped breakers. Window people never trip (their shortfall is ~0).
+    // Tripped breakers. Window people never trip (their satisfaction is ~1).
     var breaker = [];
     people.forEach(function (p) {
       if (p.noWorkWindow) return;
@@ -886,14 +918,14 @@
       worstName: worstName,
       worstShortfall: worstShortfall === -Infinity ? 0 : worstShortfall,
       breaker: breaker,
-      hasShortfall: hasShortfall,
-      pastPoints: pastPoints,
-      pastRounds: pastRounds,
-      ideals: ideals
+      hasDebt: hasDebt,
+      satNum: satNum,
+      satDen: satDen,
+      personWeight: personWeight
     };
   }
 
-  // Snapshot one run's points per person.
+  // Snapshot one run's scores per person.
   function buildRunRecord(assignment, people, cfg) {
     cfg = cfg || config;
     var byName = {};
@@ -907,16 +939,17 @@
       var e = effectiveWeights(p, cfg);
       var sp = weightOf(e.shiftWeights, a.slotIndex, 'hours');
       var rp = weightOf(e.restWeights, a.restDays, 'rest');
-      var pp = (p.priority === 'rest') ? rp : sp;
-      var soft = (p.priority === 'rest') ? sp : rp;
+      var co = personCoeffs(p, cfg);
+      var pcts = percentOf(p, co, sp, rp);
       return {
         name: a.name,
-        points: PRIORITY_WEIGHT * pp + SOFT_WEIGHT * soft,
+        priorityPct: pcts.priorityPct,
+        softPct: pcts.softPct,
+        score: scoreFromCoeffs(co, sp, rp),
         slotPoints: sp,
         restPoints: rp,
-        priorityPoints: pp,
-        softPoints: soft,
-        ideal: idealOf(p, cfg),
+        priorityPoints: pcts.priorityPoints,
+        softPoints: pcts.softPoints,
         windowed: !!p.noWorkWindow
       };
     });
@@ -924,22 +957,17 @@
     return { at: new Date().toISOString(), entries: entries };
   }
 
-  // Per-run worstness: the unique worst-off person for one recorded run and
-  // whether they are "dramatically" worse than the next-worst person.
-  //
-  // For each run a person's satisfaction is that run's points over their ideal
-  // (ideal <= 0 counts as 1). With the worst shortfall `w` and the next-worst
-  // shortfall `n`, the gap is dramatic when it clears the small floor and is
-  // either BREAKER_GAP points ahead of `n`, or at least BREAKER_RATIO times `n`.
-  // The tiny epsilon keeps floating point from blocking a genuine trip.
+  // Per-run worstness. A person's one-round satisfaction is their recorded
+  // roundScore (already 0..1). With the worst shortfall `w` and the next-worst
+  // shortfall `n`, the gap is dramatic when it clears the floor and is either
+  // BREAKER_GAP ahead of `n`, or at least BREAKER_RATIO times `n`.
   function runWorstness(run) {
     var entries = (run && run.entries) || [];
     var worstVal = -Infinity, secondVal = -Infinity, worstName = null, worstTies = 0;
     for (var i = 0; i < entries.length; i++) {
       var e = entries[i];
-      var ideal = (typeof e.ideal === 'number') ? e.ideal : 0;
-      var sat = (ideal <= 0) ? 1 : (e.points / ideal);
-      var sh = 1 - sat;
+      var score = (typeof e.score === 'number') ? e.score : 1;
+      var sh = 1 - score;
       if (sh > worstVal + EPS) { secondVal = worstVal; worstVal = sh; worstName = e.name; worstTies = 1; }
       else if (Math.abs(sh - worstVal) <= EPS) { worstTies++; }
       else if (sh > secondVal) { secondVal = sh; }
@@ -958,13 +986,13 @@
   //
   // A person's streak is recomputed deterministically from the recorded runs:
   // the number of consecutive trailing runs (ending at the most recent) in
-  // which they were the unique dramatic worst. This self-heals (any run where
-  // someone else is the worst resets them) and means existing recorded runs
-  // count immediately. A manually-seeded streak (used when an infeasible
-  // guarantee is dropped and has to carry) is preserved and extended by one
-  // only while that person remains the newest unique dramatic worst.
+  // which they were the unique dramatic worst. This self-heals and means
+  // existing recorded runs count immediately. A manually-seeded streak (used
+  // when an infeasible guarantee is dropped and has to carry) is preserved and
+  // extended by one only while that person remains the newest unique dramatic
+  // worst.
   function appendHistory(history, runRecord) {
-    history = history || emptyHistory();
+    if (!history || history.version !== HISTORY_VERSION) history = emptyHistory();
     var runs = (history.runs || []).concat([runRecord]);
     if (runs.length > MAX_HISTORY_RUNS) runs = runs.slice(runs.length - MAX_HISTORY_RUNS);
 
@@ -1080,20 +1108,18 @@
     };
   }
 
-  // Run the reward-only pass under one guarantee subset, returning the champion
-  // (or null when infeasible).
+  // Run the raw pass under one guarantee subset, returning the champion (or
+  // null when infeasible).
   function* passUnderMask(people, cfg, ctxBase, owed) {
     var ctx = {
       prog: ctxBase.prog,
-      pw: PRIORITY_WEIGHT,
-      sw: SOFT_WEIGHT,
-      owed: owed,
-      fairnessOn: false,
-      lambda: 0,
+      coeffs: ctxBase.coeffs,
+      personWeight: ctxBase.unitWeights,
+      weighted: false,
       bandFloor: -Infinity,
-      pastPoints: ctxBase.pastPoints,
-      pastRounds: ctxBase.pastRounds,
-      ideals: ctxBase.ideals,
+      owed: owed,
+      satNum: ctxBase.satNum,
+      satDen: ctxBase.satDen,
       rand: ctxBase.rand,
       champion: null,
       tieSample: [],
@@ -1109,7 +1135,7 @@
 
     if (G === 0) {
       var res0 = yield* passUnderMask(people, cfg, ctxBase, null);
-      return { champion: res0 ? res0.champion : null, tieSample: res0 ? res0.tieSample : [], mask: 0, owed: null, attemptCount: res0 ? 1 : 1 };
+      return { champion: res0 ? res0.champion : null, tieSample: res0 ? res0.tieSample : [], mask: 0, owed: null, attemptCount: 1 };
     }
 
     if (G <= SUBSET_ENUM_MAX) {
@@ -1192,53 +1218,57 @@
     prog.yieldEvery = (typeof opts.yieldEvery === 'number' && opts.yieldEvery > 0)
       ? opts.yieldEvery : YIELD_EVERY;
 
-    var lambda = (typeof opts.fairnessLambda === 'number') ? opts.fairnessLambda : FAIRNESS_LAMBDA;
+    var mu = (typeof opts.fairnessMu === 'number') ? opts.fairnessMu : FAIRNESS_MU;
     var band = (typeof opts.fairnessBand === 'number') ? opts.fairnessBand : FAIRNESS_BAND;
 
     var seed = (typeof opts.tieSeed === 'number' && isFinite(opts.tieSeed))
       ? (opts.tieSeed >>> 0) : DEFAULT_TIE_SEED;
 
     var effPeople = effectivePeople(people, cfg);
-    var fairness = computeFairness(opts.history, people, cfg);
+    var fairness = computeFairness(opts.history, people, cfg, mu);
 
     var guarantees = buildGuarantees(people, fairness.breaker);
+
+    var coeffs = effPeople.map(function (p) { return personCoeffs(p, cfg); });
+    var unitWeights = new Array(people.length);
+    for (var uw = 0; uw < unitWeights.length; uw++) unitWeights[uw] = 1;
+
     var ctxBase = {
       prog: prog,
-      pastPoints: fairness.pastPoints,
-      pastRounds: fairness.pastRounds,
-      ideals: fairness.ideals,
+      coeffs: coeffs,
+      unitWeights: unitWeights,
+      satNum: fairness.satNum,
+      satDen: fairness.satDen,
       rand: mulberry32(seed),
       tieSampleMax: 512
     };
 
-    // Pass 1: exact max reward under hard constraints (coverage, windows,
-    // and whichever breaker guarantees are feasible).
+    // Pass 1: exact maximum raw total under hard constraints (coverage,
+    // windows, and whichever breaker guarantees are feasible).
     var resolved = yield* resolveGuarantees(effPeople, cfg, ctxBase, guarantees);
     if (!resolved.champion) {
       return { ok: false, error: 'infeasible', elapsedMs: Date.now() - t0 };
     }
-    var maxTotal = resolved.champion.reward;
+    var maxTotal = resolved.champion.raw;
     var pass1Ms = Date.now() - t0;
 
-    // Pass 2: maximise the bounded-fairness objective inside the band.
+    // Pass 2: maximise the debt-weighted objective inside the band.
     var finalChampion = resolved.champion;
     var finalTieSample = resolved.tieSample;
     var usedFairness = false;
-    if (lambda > 0 && fairness.hasShortfall) {
+    if (mu > 0 && fairness.hasDebt) {
       usedFairness = true;
       prog.phase = 'pass2';
       var bandFloor = (1 - band) * maxTotal;
       var ctx2 = {
         prog: prog,
-        pw: PRIORITY_WEIGHT,
-        sw: SOFT_WEIGHT,
-        owed: resolved.owed,
-        fairnessOn: true,
-        lambda: lambda,
+        coeffs: coeffs,
+        personWeight: fairness.personWeight,
+        weighted: true,
         bandFloor: bandFloor,
-        pastPoints: fairness.pastPoints,
-        pastRounds: fairness.pastRounds,
-        ideals: fairness.ideals,
+        owed: resolved.owed,
+        satNum: fairness.satNum,
+        satDen: fairness.satDen,
         rand: mulberry32(seed),
         champion: null,
         tieSample: [],
@@ -1258,6 +1288,7 @@
 
     var rawEntries = [];
     var assignment = [];
+    var currentScores = [];
     for (var i = 0; i < people.length; i++) {
       var p = people[i];
       var e = effectiveWeights(p, cfg);
@@ -1265,8 +1296,10 @@
       var restDays = pairs[i].slice();
       var slotPoints = weightOf(e.shiftWeights, slotIndex, 'hours');
       var restPoints = weightOf(e.restWeights, restDays, 'rest');
-      var priorityPoints = (p.priority === 'rest') ? restPoints : slotPoints;
-      var softPoints = (p.priority === 'rest') ? slotPoints : restPoints;
+      var co = coeffs[i];
+      var pcts = percentOf(p, co, slotPoints, restPoints);
+      var roundScore = scoreFromCoeffs(co, slotPoints, restPoints);
+      currentScores.push(roundScore);
 
       rawEntries.push({
         person: p,
@@ -1285,8 +1318,11 @@
         priority: p.priority,
         slotPoints: slotPoints,
         restPoints: restPoints,
-        priorityPoints: priorityPoints,
-        softPoints: softPoints
+        priorityPoints: pcts.priorityPoints,
+        softPoints: pcts.softPoints,
+        priorityPct: pcts.priorityPct,
+        softPct: pcts.softPct,
+        score: roundScore
       });
     }
 
@@ -1300,31 +1336,29 @@
       });
     });
 
-    // Post-run fairness entries.
+    // Post-run fairness entries (satisfaction now includes this round).
     var fairnessEntries = [];
     var postWorstName = null;
     var postWorstShortfall = -Infinity;
     for (var fi = 0; fi < people.length; fi++) {
       var fp = people[fi];
-      var points = PRIORITY_WEIGHT * assignment[fi].priorityPoints + SOFT_WEIGHT * assignment[fi].softPoints;
-      var lifetimePoints = fairness.pastPoints[fi] + points;
-      var rounds = fairness.pastRounds[fi] + 1;
-      var ideal = fairness.ideals[fi];
-      var sat = (ideal <= 0) ? 1 : lifetimePoints / (ideal * rounds);
+      var score = currentScores[fi];
+      var num = fairness.satNum[fi] + score;
+      var den = fairness.satDen[fi] + 1;
+      var sat = num / den;
       var shortfall = 1 - sat;
+      var debt = 1 - sat;
+      var weight = 1 + mu * debt;
       if (shortfall > postWorstShortfall) { postWorstShortfall = shortfall; postWorstName = fp.name; }
       fairnessEntries.push({
         name: fp.name,
-        points: points,
-        slotPoints: assignment[fi].slotPoints,
-        restPoints: assignment[fi].restPoints,
-        priorityPoints: assignment[fi].priorityPoints,
-        softPoints: assignment[fi].softPoints,
-        ideal: ideal,
-        lifetimePoints: lifetimePoints,
-        rounds: rounds,
+        priorityPct: assignment[fi].priorityPct,
+        softPct: assignment[fi].softPct,
+        score: score,
         satisfaction: sat,
         shortfall: shortfall,
+        debt: debt,
+        personWeight: weight,
         windowed: !!fp.noWorkWindow
       });
     }
@@ -1359,7 +1393,7 @@
       slots: slots,
       assignment: assignment,
       grid: grid,
-      score: finalChampion.reward,
+      score: finalChampion.raw,
       minCoverage: min,
       maxCoverage: max,
       totalPersonHours: totalHours,
@@ -1388,7 +1422,8 @@
       fairness: {
         bandPercent: band * 100,
         maxTotal: maxTotal,
-        achievedTotal: finalChampion.reward,
+        achievedTotal: finalChampion.raw,
+        objectiveValue: finalChampion.objective,
         worstName: postWorstName,
         worstShortfall: postWorstShortfall,
         entries: fairnessEntries,
@@ -1442,13 +1477,13 @@
     HOURS_PER_DAY: HOURS_PER_DAY,
     DAYS_PER_WEEK: DAYS_PER_WEEK,
     HOURS_PER_WEEK: HOURS_PER_WEEK,
-    PRIORITY_WEIGHT: PRIORITY_WEIGHT,
-    SOFT_WEIGHT: SOFT_WEIGHT,
+    SPLIT_PRIORITY: SPLIT_PRIORITY,
+    SPLIT_SOFT: SPLIT_SOFT,
     DEFAULT_TIE_SEED: DEFAULT_TIE_SEED,
     ADJACENT_PAIRS: ADJACENT_PAIRS,
 
     // fairness tunables
-    FAIRNESS_LAMBDA: FAIRNESS_LAMBDA,
+    FAIRNESS_MU: FAIRNESS_MU,
     FAIRNESS_BAND: FAIRNESS_BAND,
     DECAY_HALF_LIFE: DECAY_HALF_LIFE,
     BREAKER_STREAK: BREAKER_STREAK,
@@ -1467,7 +1502,8 @@
     weightOf: weightOf,
     effectiveWeights: effectiveWeights,
     effectivePeople: effectivePeople,
-    idealOf: idealOf,
+    personCoeffs: personCoeffs,
+    topOptionIndex: topOptionIndex,
 
     // api
     computeSlots: computeSlots,
