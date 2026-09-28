@@ -128,13 +128,19 @@
       </p>
       <div class="history-controls">
         <button id="download-history" type="button" class="mini-btn">Download history JSON</button>
+        <button id="export-fairness" type="button" class="mini-btn">Export fairness table</button>
+        <button id="export-fairness-csv" type="button" class="mini-btn">Export table CSV</button>
+        <button id="import-history" type="button" class="mini-btn">Import fairness data</button>
         <button id="reset-history" type="button" class="mini-btn">Reset history</button>
       </div>
+      <input type="file" id="import-history-file" accept=".json,application/json" hidden>
+      <div id="history-message" class="history-message" hidden></div>
       <div id="reset-confirm" class="reset-confirm" hidden>
         <span>Clear all saved fairness history in this browser? This cannot be undone.</span>
         <button id="reset-confirm-yes" type="button" class="mini-btn">Yes, clear history</button>
         <button id="reset-confirm-no" type="button" class="mini-btn">Cancel</button>
       </div>
+      <div id="import-preview" class="import-preview" hidden></div>
     </section>
 
     <!-- 5. Run, progress and log -->

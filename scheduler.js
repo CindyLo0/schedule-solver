@@ -1046,6 +1046,162 @@
   }
 
   // ---------------------------------------------------------------------
+  // History file import/export helpers
+  // ---------------------------------------------------------------------
+  // Purely additive. Pure and DOM-free: none of these mutate their arguments.
+
+  var HISTORY_KIND = 'shift-solver-fairness';
+
+  // Validate a parsed JSON value as a history file. Accepts a raw history
+  // object, or a wrapper (from exportHistory) that carries it under `.history`.
+  // Returns { ok: true, history } or { ok: false, error }.
+  function validateHistoryFile(obj) {
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+      return { ok: false, error: 'The file is not a JSON object.' };
+    }
+
+    var h = (obj.history && typeof obj.history === 'object' && !Array.isArray(obj.history))
+      ? obj.history : obj;
+
+    if (!h || typeof h !== 'object' || Array.isArray(h)) {
+      return { ok: false, error: 'No history object was found in the file.' };
+    }
+    if (h.version !== HISTORY_VERSION) {
+      return {
+        ok: false,
+        error: 'Unsupported history version: the file says ' + String(h.version) +
+          ', but this tool expects version ' + String(HISTORY_VERSION) + '.'
+      };
+    }
+    if (!Array.isArray(h.runs)) {
+      return { ok: false, error: 'The history "runs" value is not an array.' };
+    }
+    for (var r = 0; r < h.runs.length; r++) {
+      var run = h.runs[r];
+      if (!run || typeof run !== 'object' || Array.isArray(run)) {
+        return { ok: false, error: 'Run ' + (r + 1) + ' is not an object.' };
+      }
+      if (!Array.isArray(run.entries)) {
+        return { ok: false, error: 'Run ' + (r + 1) + ' is missing an "entries" array.' };
+      }
+      for (var e = 0; e < run.entries.length; e++) {
+        var entry = run.entries[e];
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+          return { ok: false, error: 'Run ' + (r + 1) + ' entry ' + (e + 1) + ' is not an object.' };
+        }
+        if (typeof entry.name !== 'string') {
+          return { ok: false, error: 'Run ' + (r + 1) + ' entry ' + (e + 1) + ' has a non-string name.' };
+        }
+        if (typeof entry.score !== 'number' || !isFinite(entry.score)) {
+          return { ok: false, error: 'Run ' + (r + 1) + ' entry ' + (e + 1) + ' has a non-numeric score.' };
+        }
+        if (entry.score < 0 || entry.score > 1) {
+          return {
+            ok: false,
+            error: 'Run ' + (r + 1) + ' entry ' + (e + 1) + ' has a score of ' + entry.score +
+              ', which is outside the allowed 0..1 range.'
+          };
+        }
+      }
+    }
+    if (h.fingerprints != null &&
+        (typeof h.fingerprints !== 'object' || Array.isArray(h.fingerprints))) {
+      return { ok: false, error: 'The history "fingerprints" value must be an object.' };
+    }
+    if (h.breaker != null &&
+        (typeof h.breaker !== 'object' || Array.isArray(h.breaker))) {
+      return { ok: false, error: 'The history "breaker" value must be an object.' };
+    }
+
+    return { ok: true, history: h };
+  }
+
+  // Build a plain, display-ready summary of a history file against the current
+  // team. Satisfaction/debt are computed on a deep clone, so the live history
+  // is never mutated. `exportedAt` is optional and echoed back when supplied.
+  function historySummary(history, people, cfg, exportedAt) {
+    people = people || [];
+    var clone = history ? JSON.parse(JSON.stringify(history)) : emptyHistory();
+
+    var srcRuns = (history && Array.isArray(history.runs)) ? history.runs : [];
+
+    // Every distinct name mentioned in the file, in first-seen order.
+    var fileNames = [];
+    var seenFile = {};
+    function addFile(n) {
+      if (typeof n === 'string' && !seenFile[n]) { seenFile[n] = true; fileNames.push(n); }
+    }
+    srcRuns.forEach(function (run) {
+      ((run && run.entries) || []).forEach(function (e) { addFile(e && e.name); });
+    });
+    Object.keys((history && history.fingerprints) || {}).forEach(addFile);
+    Object.keys((history && history.breaker) || {}).forEach(addFile);
+
+    var teamNames = {};
+    people.forEach(function (p) { teamNames[p.name] = true; });
+
+    var unknown = fileNames.filter(function (n) { return !teamNames[n]; });
+    var missing = people.filter(function (p) { return !seenFile[p.name]; })
+      .map(function (p) { return p.name; });
+    var mismatches = people.filter(function (p) {
+      var stored = history && history.fingerprints ? history.fingerprints[p.name] : undefined;
+      return stored != null && stored !== fingerprintOf(p, cfg);
+    }).map(function (p) { return p.name; });
+
+    var fairness = computeFairness(clone, people, cfg);
+    var byName = {};
+    fairness.entries.forEach(function (e) { byName[e.name] = e; });
+
+    var latestByName = {};
+    if (srcRuns.length) {
+      var last = srcRuns[srcRuns.length - 1];
+      ((last && last.entries) || []).forEach(function (e) {
+        if (e && typeof e.name === 'string') {
+          latestByName[e.name] = (typeof e.score === 'number') ? e.score : null;
+        }
+      });
+    }
+
+    var rows = [];
+    people.forEach(function (p) {
+      var e = byName[p.name];
+      var status;
+      if (!seenFile[p.name]) status = 'fresh';
+      else if (mismatches.indexOf(p.name) >= 0) status = 'fingerprint-changed';
+      else status = 'matched';
+      rows.push({
+        name: p.name,
+        satisfaction: e ? e.satisfaction : null,
+        debt: e ? e.debt : null,
+        latest: Object.prototype.hasOwnProperty.call(latestByName, p.name) ? latestByName[p.name] : null,
+        windowed: !!p.noWorkWindow,
+        status: status
+      });
+    });
+    unknown.forEach(function (n) {
+      rows.push({
+        name: n,
+        satisfaction: null,
+        debt: null,
+        latest: Object.prototype.hasOwnProperty.call(latestByName, n) ? latestByName[n] : null,
+        windowed: false,
+        status: 'unknown'
+      });
+    });
+
+    var out = {
+      rounds: srcRuns.length,
+      rows: rows,
+      found: fileNames.slice(),
+      unknown: unknown,
+      missing: missing,
+      mismatches: mismatches
+    };
+    if (exportedAt != null) out.exportedAt = exportedAt;
+    return out;
+  }
+
+  // ---------------------------------------------------------------------
   // Breaker guarantee subset resolution
   // ---------------------------------------------------------------------
 
@@ -1520,7 +1676,11 @@
     SUBSET_ENUM_MAX: SUBSET_ENUM_MAX,
     buildRunRecord: buildRunRecord,
     computeFairness: computeFairness,
-    appendHistory: appendHistory
+    appendHistory: appendHistory,
+    fingerprintOf: fingerprintOf,
+    validateHistoryFile: validateHistoryFile,
+    historySummary: historySummary,
+    HISTORY_KIND: HISTORY_KIND
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = Scheduler;

@@ -725,9 +725,257 @@
     }
   }
 
+  // ------------------------------------------------------------------
+  // Fairness table export (JSON + CSV)
+  // ------------------------------------------------------------------
+
+  function saveTextFile(filename, text, mime) {
+    try {
+      var blob = new Blob([text], { type: mime });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(url); }, 0);
+      return true;
+    } catch (err) {
+      return false;
+    }
+  }
+
+  function fairnessSummaryRows() {
+    var f = currentFairness(state);
+    return state.map(function (p) {
+      var e = fairnessByName(f, p.name);
+      var latest = latestRunScore(p.name);
+      return {
+        person: p.name,
+        satisfaction: e && typeof e.satisfaction === 'number' ? e.satisfaction : null,
+        debt: e && typeof e.debt === 'number' ? e.debt : null,
+        latestRoundScore: latest
+      };
+    });
+  }
+
+  function exportFairnessTable() {
+    var exportedAt = new Date().toISOString();
+    var payload = {
+      kind: S.HISTORY_KIND || 'shift-solver-fairness',
+      exportedAt: exportedAt,
+      rounds: (history.runs || []).length,
+      version: S.HISTORY_VERSION,
+      summary: fairnessSummaryRows(),
+      history: history
+    };
+    var ok = saveTextFile('shift-solver-fairness.json',
+      JSON.stringify(payload, null, 2), 'application/json');
+    showHistoryMessage(ok
+      ? 'Fairness table exported as shift-solver-fairness.json.'
+      : 'Could not build the fairness download in this browser.', !ok);
+  }
+
+  function csvCell(v) {
+    var s = (v === null || v === undefined) ? '' : String(v);
+    if (/[",\r\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+    return s;
+  }
+
+  function exportFairnessCsv() {
+    var rows = fairnessSummaryRows();
+    var lines = [];
+    lines.push('exportedAt,' + csvCell(new Date().toISOString()));
+    lines.push('rounds,' + csvCell((history.runs || []).length));
+    lines.push('Person,Satisfaction,Debt,LatestRoundScore');
+    rows.forEach(function (r) {
+      lines.push([
+        csvCell(r.person),
+        csvCell(r.satisfaction),
+        csvCell(r.debt),
+        csvCell(r.latestRoundScore)
+      ].join(','));
+    });
+    var ok = saveTextFile('shift-solver-fairness.csv', lines.join('\r\n') + '\r\n', 'text/csv');
+    showHistoryMessage(ok
+      ? 'Fairness table exported as shift-solver-fairness.csv.'
+      : 'Could not build the fairness CSV in this browser.', !ok);
+  }
+
+  // ------------------------------------------------------------------
+  // Fairness data import (preview first, confirm before replacing)
+  // ------------------------------------------------------------------
+
+  var pendingImportedHistory = null;
+
+  function showHistoryMessage(text, isError) {
+    var box = document.getElementById('history-message');
+    if (!box) return;
+    box.textContent = text;
+    box.classList.toggle('error', !!isError);
+    box.hidden = false;
+  }
+
+  function hideImportPreview() {
+    var box = document.getElementById('import-preview');
+    if (box) { box.innerHTML = ''; box.hidden = true; }
+  }
+
+  // Drop entries for names not on the current team, keeping every run (so the
+  // recency weighting of everyone else is unchanged). Never mutates the source.
+  function normalizeHistoryForTeam(src, people) {
+    var teamNames = {};
+    people.forEach(function (p) { teamNames[p.name] = true; });
+    var runs = (src.runs || []).map(function (run) {
+      return {
+        at: run && run.at,
+        entries: ((run && run.entries) || []).filter(function (e) {
+          return e && teamNames[e.name];
+        })
+      };
+    });
+    var fingerprints = {};
+    Object.keys(src.fingerprints || {}).forEach(function (n) {
+      if (teamNames[n]) fingerprints[n] = src.fingerprints[n];
+    });
+    var breaker = {};
+    Object.keys(src.breaker || {}).forEach(function (n) {
+      if (teamNames[n]) breaker[n] = src.breaker[n];
+    });
+    return { version: S.HISTORY_VERSION, runs: runs, fingerprints: fingerprints, breaker: breaker };
+  }
+
+  function renderImportPreview(summary) {
+    var box = document.getElementById('import-preview');
+    if (!box) return;
+    box.innerHTML = '';
+
+    box.appendChild(el('h4', 'sub-head', 'Import preview'));
+    box.appendChild(el('p', null, 'Rounds found: ' + summary.rounds + '. People found: ' +
+      (summary.found.length ? summary.found.join(', ') : 'none') + '.'));
+
+    if (summary.unknown.length) {
+      box.appendChild(el('p', 'import-warning', 'Unknown in file (will be ignored): ' +
+        summary.unknown.join(', ') + '.'));
+    }
+    if (summary.missing.length) {
+      box.appendChild(el('p', 'import-warning', 'Missing from file (will start fresh at 100% ' +
+        'satisfaction / 0 debt): ' + summary.missing.join(', ') + '.'));
+    }
+    if (summary.mismatches.length) {
+      box.appendChild(el('p', 'import-warning', 'Preferences changed since this file was exported, so ' +
+        'the imported history cannot apply and they start fresh: ' + summary.mismatches.join(', ') + '.'));
+    }
+
+    if (summary.rows.length) {
+      var table = el('table', 'data-table import-table');
+      var thead = el('thead');
+      var hr = el('tr');
+      ['Person', 'Satisfaction', 'Debt', 'Latest round score', 'Status'].forEach(function (h) {
+        hr.appendChild(el('th', null, h));
+      });
+      thead.appendChild(hr);
+      table.appendChild(thead);
+      var tbody = el('tbody');
+      summary.rows.forEach(function (row) {
+        var tr = document.createElement('tr');
+        tr.appendChild(el('td', null, row.name));
+        tr.appendChild(el('td', null, row.satisfaction === null ? '\u2014' : fmtPct(row.satisfaction)));
+        tr.appendChild(el('td', null, row.debt === null ? '\u2014' : fmtPct(row.debt)));
+        tr.appendChild(el('td', null, row.latest === null ? '\u2014' : fmtPct(row.latest)));
+        tr.appendChild(el('td', null, row.status));
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      box.appendChild(table);
+    }
+
+    var actions = el('div', 'import-actions');
+    var yes = el('button', 'mini-btn', 'Yes, replace fairness history');
+    yes.type = 'button';
+    yes.addEventListener('click', confirmImport);
+    var cancel = el('button', 'mini-btn', 'Cancel');
+    cancel.type = 'button';
+    cancel.addEventListener('click', cancelImport);
+    actions.appendChild(yes);
+    actions.appendChild(cancel);
+    box.appendChild(actions);
+    box.hidden = false;
+  }
+
+  function cancelImport() {
+    pendingImportedHistory = null;
+    hideImportPreview();
+    showHistoryMessage('Import cancelled. Nothing was changed.', false);
+  }
+
+  function confirmImport() {
+    if (!pendingImportedHistory) { cancelImport(); return; }
+    history = normalizeHistoryForTeam(pendingImportedHistory, state);
+    pendingImportedHistory = null;
+    hideImportPreview();
+    saveHistory();
+    refreshFairness();
+    showHistoryMessage('Fairness history imported (' + history.runs.length + ' round' +
+      (history.runs.length === 1 ? '' : 's') + ' restored).', false);
+  }
+
+  function handleImportFile(file) {
+    var reader = new FileReader();
+    reader.onerror = function () {
+      showHistoryMessage('Could not read that file.', true);
+    };
+    reader.onload = function () {
+      var parsed;
+      try {
+        parsed = JSON.parse(String(reader.result));
+      } catch (err) {
+        hideImportPreview();
+        pendingImportedHistory = null;
+        showHistoryMessage('That file is not valid JSON: ' +
+          (err && err.message ? err.message : 'parse error') + '.', true);
+        return;
+      }
+      var v = S.validateHistoryFile(parsed);
+      if (!v.ok) {
+        hideImportPreview();
+        pendingImportedHistory = null;
+        showHistoryMessage('Import rejected: ' + v.error, true);
+        return;
+      }
+      // Preview only: computed on a clone, never runs the solver, never
+      // touches the live history. The live history changes only on confirm.
+      var summary = S.historySummary(v.history, state, config, parsed && parsed.exportedAt);
+      pendingImportedHistory = v.history;
+      renderImportPreview(summary);
+      showHistoryMessage('Ready to import ' + summary.rounds + ' round' +
+        (summary.rounds === 1 ? '' : 's') + '. Review the preview, then confirm.', false);
+    };
+    reader.readAsText(file);
+  }
+
   function wireHistoryControls() {
     var dl = document.getElementById('download-history');
     if (dl) dl.addEventListener('click', downloadHistory);
+
+    var exportBtn = document.getElementById('export-fairness');
+    if (exportBtn) exportBtn.addEventListener('click', exportFairnessTable);
+    var exportCsvBtn = document.getElementById('export-fairness-csv');
+    if (exportCsvBtn) exportCsvBtn.addEventListener('click', exportFairnessCsv);
+
+    var importBtn = document.getElementById('import-history');
+    var fileInput = document.getElementById('import-history-file');
+    if (importBtn && fileInput) {
+      importBtn.addEventListener('click', function () {
+        fileInput.value = '';
+        fileInput.click();
+      });
+      fileInput.addEventListener('change', function () {
+        var file = fileInput.files && fileInput.files[0];
+        if (file) handleImportFile(file);
+      });
+    }
 
     var reset = document.getElementById('reset-history');
     var confirmBox = document.getElementById('reset-confirm');
