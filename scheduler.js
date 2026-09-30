@@ -1202,6 +1202,198 @@
   }
 
   // ---------------------------------------------------------------------
+  // Preferences file import/export helpers
+  // ---------------------------------------------------------------------
+  // Purely additive. Pure and DOM-free: none of these mutate their arguments,
+  // and every person returned is a fresh deep clone.
+
+  var PREF_VERSION = 1;
+  var PREF_KIND = 'shift-solver-preferences';
+
+  // Deep-clone one person (no validation). Unknown fields are dropped.
+  function clonePreferencePerson(p) {
+    p = p || {};
+    var win = p.noWorkWindow;
+    return {
+      name: p.name,
+      shiftWeights: Array.isArray(p.shiftWeights) ? p.shiftWeights.slice() : [],
+      restWeights: Array.isArray(p.restWeights) ? p.restWeights.slice() : [],
+      priority: p.priority,
+      noWorkWindow: (win && typeof win === 'object' && !Array.isArray(win))
+        ? {
+            startDay: win.startDay,
+            startHour: win.startHour,
+            endDay: win.endDay,
+            endHour: win.endHour
+          }
+        : null
+    };
+  }
+
+  function isIntInRange(v, lo, hi) {
+    return typeof v === 'number' && isFinite(v) && Math.floor(v) === v && v >= lo && v <= hi;
+  }
+
+  // Validate and normalize one person. Returns { ok:true, person, warnings }
+  // or { ok:false, error }. The argument is never mutated.
+  function normalizePreferencePerson(p) {
+    var warnings = [];
+    if (!p || typeof p !== 'object' || Array.isArray(p)) {
+      return { ok: false, error: 'Each person must be a JSON object.' };
+    }
+    if (typeof p.name !== 'string') {
+      return { ok: false, error: 'Each person needs a "name" that is a string.' };
+    }
+    if (p.name === '') warnings.push('A person has an empty name.');
+
+    function readWeights(arr, len, label) {
+      if (!Array.isArray(arr)) {
+        return { ok: false, error: 'Person "' + p.name + '" needs "' + label +
+          '" to be an array of ' + len + ' numbers.' };
+      }
+      if (arr.length !== len) {
+        return { ok: false, error: 'Person "' + p.name + '" has ' + arr.length + ' ' +
+          label + ' values; expected exactly ' + len + '.' };
+      }
+      var out = [];
+      var clamped = false;
+      for (var i = 0; i < len; i++) {
+        var v = arr[i];
+        if (typeof v !== 'number' || !isFinite(v)) {
+          return { ok: false, error: 'Person "' + p.name + '" has a non-numeric ' + label +
+            ' value at position ' + (i + 1) + '.' };
+        }
+        if (v < 0) { out.push(0); clamped = true; }
+        else if (v > 100) { out.push(100); clamped = true; }
+        else out.push(v);
+      }
+      return { ok: true, values: out, clamped: clamped };
+    }
+
+    var shift = readWeights(p.shiftWeights, 8, 'shiftWeights');
+    if (!shift.ok) return { ok: false, error: shift.error };
+    var rest = readWeights(p.restWeights, 7, 'restWeights');
+    if (!rest.ok) return { ok: false, error: rest.error };
+    if (shift.clamped) warnings.push('Person "' + p.name + '" had out-of-range shift weights clamped to 0..100.');
+    if (rest.clamped) warnings.push('Person "' + p.name + '" had out-of-range rest weights clamped to 0..100.');
+
+    if (p.priority !== 'rest' && p.priority !== 'hours') {
+      return { ok: false, error: 'Person "' + p.name +
+        '" needs "priority" to be exactly "rest" or "hours".' };
+    }
+
+    var win = null;
+    if (p.noWorkWindow != null) {
+      var w = p.noWorkWindow;
+      if (typeof w !== 'object' || Array.isArray(w)) {
+        return { ok: false, error: 'Person "' + p.name + '" has a "noWorkWindow" that is not an object.' };
+      }
+      var fields = ['startDay', 'startHour', 'endDay', 'endHour'];
+      for (var f = 0; f < fields.length; f++) {
+        if (!Object.prototype.hasOwnProperty.call(w, fields[f])) {
+          return { ok: false, error: 'Person "' + p.name + '" noWorkWindow is missing "' + fields[f] + '".' };
+        }
+      }
+      if (!isIntInRange(w.startDay, 0, 6)) {
+        return { ok: false, error: 'Person "' + p.name + '" noWorkWindow startDay must be an integer 0..6.' };
+      }
+      if (!isIntInRange(w.endDay, 0, 6)) {
+        return { ok: false, error: 'Person "' + p.name + '" noWorkWindow endDay must be an integer 0..6.' };
+      }
+      if (!isIntInRange(w.startHour, 0, 23)) {
+        return { ok: false, error: 'Person "' + p.name + '" noWorkWindow startHour must be an integer 0..23.' };
+      }
+      if (!isIntInRange(w.endHour, 0, 23)) {
+        return { ok: false, error: 'Person "' + p.name + '" noWorkWindow endHour must be an integer 0..23.' };
+      }
+      win = {
+        startDay: w.startDay,
+        startHour: w.startHour,
+        endDay: w.endDay,
+        endHour: w.endHour
+      };
+    }
+
+    return {
+      ok: true,
+      warnings: warnings,
+      person: {
+        name: p.name,
+        shiftWeights: shift.values,
+        restWeights: rest.values,
+        priority: p.priority,
+        noWorkWindow: win
+      }
+    };
+  }
+
+  // Build a preferences file payload from people and a tie seed. Pure.
+  function serializePreferences(people, tieSeed) {
+    var list = Array.isArray(people) ? people : [];
+    return {
+      kind: PREF_KIND,
+      version: PREF_VERSION,
+      exportedAt: new Date().toISOString(),
+      people: list.map(clonePreferencePerson),
+      tieSeed: (typeof tieSeed === 'number' && isFinite(tieSeed)) ? tieSeed : null
+    };
+  }
+
+  // Validate a parsed JSON value as a preferences file. Accepts a wrapper
+  // (kind === PREF_KIND and a "people" array), a bare { people:[...] }, and a
+  // bare array. Returns { ok:true, people, tieSeed, warnings } or
+  // { ok:false, error }. The argument is never mutated.
+  function validatePreferencesFile(obj) {
+    var people;
+    var tieSeed = null;
+
+    if (Array.isArray(obj)) {
+      people = obj;
+    } else if (obj && typeof obj === 'object') {
+      if (obj.kind === PREF_KIND) {
+        if (obj.version !== PREF_VERSION) {
+          return {
+            ok: false,
+            error: 'Unsupported preferences version: the file says ' + String(obj.version) +
+              ', but this tool expects version ' + String(PREF_VERSION) + '.'
+          };
+        }
+        people = obj.people;
+      } else if (Object.prototype.hasOwnProperty.call(obj, 'people')) {
+        people = obj.people;
+      } else {
+        return { ok: false, error: 'No preferences were found in the file.' };
+      }
+      if (typeof obj.tieSeed === 'number' && isFinite(obj.tieSeed)) tieSeed = obj.tieSeed;
+    } else {
+      return { ok: false, error: 'The file is not a JSON object or array.' };
+    }
+
+    if (!Array.isArray(people) || people.length === 0) {
+      return { ok: false, error: 'The preferences "people" value must be a non-empty array.' };
+    }
+
+    var warnings = [];
+    var out = [];
+    var seen = {};
+    for (var i = 0; i < people.length; i++) {
+      var res = normalizePreferencePerson(people[i]);
+      if (!res.ok) {
+        return { ok: false, error: 'Person ' + (i + 1) + ': ' + res.error };
+      }
+      warnings = warnings.concat(res.warnings);
+      if (Object.prototype.hasOwnProperty.call(seen, res.person.name)) {
+        warnings.push('Duplicate name "' + res.person.name + '".');
+      } else {
+        seen[res.person.name] = true;
+      }
+      out.push(res.person);
+    }
+
+    return { ok: true, people: out, tieSeed: tieSeed, warnings: warnings };
+  }
+
+  // ---------------------------------------------------------------------
   // Breaker guarantee subset resolution
   // ---------------------------------------------------------------------
 
@@ -1680,7 +1872,14 @@
     fingerprintOf: fingerprintOf,
     validateHistoryFile: validateHistoryFile,
     historySummary: historySummary,
-    HISTORY_KIND: HISTORY_KIND
+    HISTORY_KIND: HISTORY_KIND,
+
+    // preferences file helpers
+    PREF_VERSION: PREF_VERSION,
+    PREF_KIND: PREF_KIND,
+    serializePreferences: serializePreferences,
+    validatePreferencesFile: validatePreferencesFile,
+    normalizePreferencePerson: normalizePreferencePerson
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = Scheduler;

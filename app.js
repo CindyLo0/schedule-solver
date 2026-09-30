@@ -63,6 +63,7 @@
   // HISTORY_VERSION are deliberately ignored, so stale data is never read.
 
   var HISTORY_KEY = 'shift-solver-history-v3';
+  var PREF_KEY = 'shift-solver-preferences-v1';
   var storageWorking = true;
   var history = loadHistory();
 
@@ -103,6 +104,50 @@
   function saveHistory() {
     try {
       window.localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+      storageWorking = true;
+    } catch (err) {
+      storageWorking = false;
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // Saved preferences (persisted in this browser, key shift-solver-preferences-v1)
+  // ------------------------------------------------------------------
+  //
+  // Only the person settings and the current tie seed are remembered. UI-only
+  // details (how the ledger is scrolled, etc.) are not. Anything missing,
+  // unreadable, or invalid falls back to the built-in defaults.
+
+  function readSeedInput() {
+    var input = document.getElementById('tie-seed');
+    if (!input) return null;
+    var n = parseInt(input.value, 10);
+    return isNaN(n) ? null : n;
+  }
+
+  function loadPreferences() {
+    try {
+      var raw = window.localStorage.getItem(PREF_KEY);
+      if (!raw) return null;
+      var parsed = JSON.parse(raw);
+      var v = S.validatePreferencesFile(parsed);
+      if (!v.ok || !v.people.length) return null;
+      return v.people;
+    } catch (err) {
+      storageWorking = false;
+      return null;
+    }
+  }
+
+  function savePreferences() {
+    try {
+      var payload = {
+        kind: S.PREF_KIND,
+        version: S.PREF_VERSION,
+        people: state,
+        tieSeed: readSeedInput()
+      };
+      window.localStorage.setItem(PREF_KEY, JSON.stringify(payload));
       storageWorking = true;
     } catch (err) {
       storageWorking = false;
@@ -281,6 +326,7 @@
     nameInput.setAttribute('aria-label', 'Name');
     nameInput.addEventListener('input', function () {
       state[index].name = nameInput.value;
+      savePreferences();
       refreshFairness();
     });
     head.appendChild(nameInput);
@@ -294,6 +340,7 @@
     restBtn.addEventListener('click', function () {
       state[index].priority = 'rest';
       updatePerson(view);
+      savePreferences();
       refreshStanding();
     });
     var hoursBtn = el('button', null, 'Work hours');
@@ -302,6 +349,7 @@
     hoursBtn.addEventListener('click', function () {
       state[index].priority = 'hours';
       updatePerson(view);
+      savePreferences();
       refreshStanding();
     });
     group.appendChild(restBtn);
@@ -413,6 +461,7 @@
         endDay: parseInt(endDaySel.value, 10),
         endHour: parseInt(endHourSel.value, 10)
       };
+      savePreferences();
     }
 
     winEnabled.addEventListener('change', function () {
@@ -425,6 +474,7 @@
         state[index].noWorkWindow = null;
       }
       updatePerson(view);
+      savePreferences();
       refreshStanding();
     });
 
@@ -457,6 +507,7 @@
     arr[index] = v;
     if (raw !== '' && String(v) !== raw) input.value = String(v);
     updateTotals(view);
+    savePreferences();
     refreshStanding();
   }
 
@@ -995,6 +1046,187 @@
         confirmBox.hidden = true;
         refreshFairness();
         logLine('Fairness history cleared.');
+      });
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // Preferences export / import / reset (separate from fairness history)
+  // ------------------------------------------------------------------
+  //
+  // Importing preferences never touches the fairness history object. The
+  // preview only reads it; the normal fingerprint reset that the engine
+  // performs on the next refresh is what clears stale per-person history.
+
+  var pendingImportedPeople = null;
+  var pendingImportedSeed = null;
+
+  function showPrefsMessage(text, isError) {
+    var box = document.getElementById('prefs-message');
+    if (!box) return;
+    box.textContent = text;
+    box.classList.toggle('error', !!isError);
+    box.hidden = false;
+  }
+
+  function hidePrefsImportPreview() {
+    var box = document.getElementById('import-prefs-preview');
+    if (box) { box.innerHTML = ''; box.hidden = true; }
+  }
+
+  function exportPreferences() {
+    var payload = S.serializePreferences(state, readSeedInput());
+    var ok = saveTextFile('shift-solver-preferences.json',
+      JSON.stringify(payload, null, 2), 'application/json');
+    showPrefsMessage(ok
+      ? 'Preferences exported as shift-solver-preferences.json.'
+      : 'Could not build the preferences download in this browser.', !ok);
+  }
+
+  // Names whose saved fairness history cannot apply to the imported settings
+  // because their fingerprint differs from the one stored in the history.
+  function fingerprintResetNames(people) {
+    var out = [];
+    var fps = (history && history.fingerprints) || {};
+    people.forEach(function (p) {
+      var stored = fps[p.name];
+      if (stored != null && stored !== S.fingerprintOf(p, config)) out.push(p.name);
+    });
+    return out;
+  }
+
+  function renderImportPrefsPreview(v, resetNames) {
+    var box = document.getElementById('import-prefs-preview');
+    if (!box) return;
+    box.innerHTML = '';
+
+    box.appendChild(el('h4', 'sub-head', 'Import preview'));
+    box.appendChild(el('p', null, 'People: ' + v.people.length + ' \u2014 ' +
+      v.people.map(function (p) { return p.name === '' ? '(unnamed)' : p.name; }).join(', ') + '.'));
+    box.appendChild(el('p', null, v.tieSeed == null
+      ? 'No tie seed is included; the current seed will stay as it is.'
+      : 'Included tie seed: ' + v.tieSeed + '.'));
+
+    (v.warnings || []).forEach(function (w) {
+      box.appendChild(el('p', 'import-warning', w));
+    });
+
+    if (resetNames.length) {
+      box.appendChild(el('p', 'import-warning',
+        'These people\u2019s fairness history will reset because their settings changed: ' +
+        resetNames.join(', ') + '.'));
+    } else {
+      box.appendChild(el('p', null,
+        'No saved fairness history needs to reset for these settings.'));
+    }
+
+    var actions = el('div', 'import-actions');
+    var yes = el('button', 'mini-btn', 'Yes, replace preferences');
+    yes.type = 'button';
+    yes.addEventListener('click', confirmImportPrefs);
+    var cancel = el('button', 'mini-btn', 'Cancel');
+    cancel.type = 'button';
+    cancel.addEventListener('click', cancelImportPrefs);
+    actions.appendChild(yes);
+    actions.appendChild(cancel);
+    box.appendChild(actions);
+    box.hidden = false;
+  }
+
+  function cancelImportPrefs() {
+    pendingImportedPeople = null;
+    pendingImportedSeed = null;
+    hidePrefsImportPreview();
+    showPrefsMessage('Import cancelled. Nothing was changed.', false);
+  }
+
+  function confirmImportPrefs() {
+    if (!pendingImportedPeople) { cancelImportPrefs(); return; }
+    var seedInput = document.getElementById('tie-seed');
+    if (pendingImportedSeed != null && seedInput) {
+      seedInput.value = String(pendingImportedSeed);
+    }
+    state = pendingImportedPeople;
+    pendingImportedPeople = null;
+    pendingImportedSeed = null;
+    hidePrefsImportPreview();
+    savePreferences();
+    renderPeople();
+    refreshFairness();
+    showPrefsMessage('Preferences imported (' + state.length + ' people).', false);
+  }
+
+  function handleImportPrefsFile(file) {
+    var reader = new FileReader();
+    reader.onerror = function () {
+      showPrefsMessage('Could not read that file.', true);
+    };
+    reader.onload = function () {
+      var parsed;
+      try {
+        parsed = JSON.parse(String(reader.result));
+      } catch (err) {
+        hidePrefsImportPreview();
+        pendingImportedPeople = null;
+        pendingImportedSeed = null;
+        showPrefsMessage('That file is not valid JSON: ' +
+          (err && err.message ? err.message : 'parse error') + '.', true);
+        return;
+      }
+      var v = S.validatePreferencesFile(parsed);
+      if (!v.ok) {
+        hidePrefsImportPreview();
+        pendingImportedPeople = null;
+        pendingImportedSeed = null;
+        showPrefsMessage('Import rejected: ' + v.error, true);
+        return;
+      }
+      // Preview only. Nothing is changed until the user confirms.
+      pendingImportedPeople = v.people;
+      pendingImportedSeed = v.tieSeed;
+      renderImportPrefsPreview(v, fingerprintResetNames(v.people));
+      showPrefsMessage('Ready to import ' + v.people.length + ' people. ' +
+        'Review the preview, then confirm.', false);
+    };
+    reader.readAsText(file);
+  }
+
+  function wirePreferenceControls() {
+    var exportBtn = document.getElementById('export-prefs');
+    if (exportBtn) exportBtn.addEventListener('click', exportPreferences);
+
+    var importBtn = document.getElementById('import-prefs');
+    var fileInput = document.getElementById('import-prefs-file');
+    if (importBtn && fileInput) {
+      importBtn.addEventListener('click', function () {
+        fileInput.value = '';
+        fileInput.click();
+      });
+      fileInput.addEventListener('change', function () {
+        var file = fileInput.files && fileInput.files[0];
+        if (file) handleImportPrefsFile(file);
+      });
+    }
+
+    var reset = document.getElementById('reset-prefs');
+    var confirmBox = document.getElementById('reset-prefs-confirm');
+    var yes = document.getElementById('reset-prefs-confirm-yes');
+    var no = document.getElementById('reset-prefs-confirm-no');
+
+    if (reset && confirmBox) {
+      reset.addEventListener('click', function () { confirmBox.hidden = false; });
+    }
+    if (no && confirmBox) {
+      no.addEventListener('click', function () { confirmBox.hidden = true; });
+    }
+    if (yes && confirmBox) {
+      yes.addEventListener('click', function () {
+        state = S.defaultPeople.map(clonePerson);
+        savePreferences();
+        renderPeople();
+        confirmBox.hidden = true;
+        refreshFairness();
+        showPrefsMessage('Preferences reset to the built-in defaults.', false);
       });
     }
   }
@@ -1549,9 +1781,13 @@
   // Boot
   // ------------------------------------------------------------------
 
+  var savedPeople = loadPreferences();
+  if (savedPeople) state = savedPeople;
+
   renderConstraints();
   renderPeople();
   wireRun();
   wireHistoryControls();
+  wirePreferenceControls();
   refreshFairness();
 })();

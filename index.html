@@ -76,6 +76,26 @@
       </p>
       <p class="note">All eight slots start at fixed times beginning 00:00.</p>
       <div id="people-list" class="people-list"></div>
+
+      <h3 class="sub-head">Save these preferences</h3>
+      <p class="note">
+        Your edits are remembered in this browser automatically. You can also download them
+        as a JSON file, import a saved set, or reset everything to the built-in defaults.
+        This is separate from the fairness history above.
+      </p>
+      <div class="history-controls">
+        <button id="export-prefs" type="button" class="mini-btn">Export preferences</button>
+        <button id="import-prefs" type="button" class="mini-btn">Import preferences</button>
+        <button id="reset-prefs" type="button" class="mini-btn danger">Reset to defaults</button>
+      </div>
+      <input type="file" id="import-prefs-file" accept=".json,application/json" hidden>
+      <div id="prefs-message" class="history-message" hidden></div>
+      <div id="reset-prefs-confirm" class="reset-confirm" hidden>
+        <span>Reset all preferences to the built-in defaults? Your fairness history is kept. This cannot be undone.</span>
+        <button id="reset-prefs-confirm-yes" type="button" class="mini-btn">Yes, reset preferences</button>
+        <button id="reset-prefs-confirm-no" type="button" class="mini-btn">Cancel</button>
+      </div>
+      <div id="import-prefs-preview" class="import-preview" hidden></div>
     </section>
 
     <!-- 4. Cross-run fairness -->
